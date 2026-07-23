@@ -35,63 +35,76 @@ public class ExampleMod implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("AutoBuy mod initialized.");
 
-        // 1. ПЕРЕХВАТ ЧАТА ДЛЯ КОМАНД С ТОЧКОЙ (.)
+        // 1. ЖЕЛЕЗОБЕТОННЫЙ ПЕРЕХВАТ ЧАТА
         ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
-            // Обрабатываем .startbot
-            if (message.startsWith(".startbot")) {
-                isActive = !isActive;
-                sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"), isActive ? Formatting.GREEN : Formatting.RED);
-                if (isActive) {
-                    setState(BotState.CHECK_BALANCE);
-                } else {
-                    setState(BotState.IDLE);
+            try {
+                String text = message.trim().toLowerCase();
+                
+                // Обработка .startbot
+                if (text.equals(".startbot")) {
+                    // Перекидываем выполнение в главный поток, чтобы игра не блокировала вывод
+                    MinecraftClient.getInstance().execute(() -> {
+                        isActive = !isActive;
+                        sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"), isActive ? Formatting.GREEN : Formatting.RED);
+                        if (isActive) {
+                            setState(BotState.CHECK_BALANCE);
+                        } else {
+                            setState(BotState.IDLE);
+                        }
+                    });
+                    return false; // Отсекаем отправку на сервер
                 }
-                return false; // Отменяем отправку на сервер
-            }
 
-            // Обрабатываем .botmax
-            if (message.startsWith(".botmax")) {
-                try {
-                    String[] parts = message.split(" ");
-                    if (parts.length > 1) {
-                        maxBudget = Long.parseLong(parts[1]);
-                        sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
-                    } else {
-                        sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED);
-                    }
-                } catch (NumberFormatException e) {
-                    sendMsg("Ошибка: введите число. Пример: .botmax 250000", Formatting.RED);
+                // Обработка .botmax
+                if (text.startsWith(".botmax")) {
+                    MinecraftClient.getInstance().execute(() -> {
+                        try {
+                            String[] parts = text.split(" ");
+                            if (parts.length > 1) {
+                                maxBudget = Long.parseLong(parts[1]);
+                                sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
+                            } else {
+                                sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED);
+                            }
+                        } catch (NumberFormatException e) {
+                            sendMsg("Ошибка: введите число. Пример: .botmax 250000", Formatting.RED);
+                        }
+                    });
+                    return false; // Отсекаем отправку на сервер
                 }
-                return false; // Отменяем отправку на сервер
+            } catch (Exception e) {
+                LOGGER.error("Ошибка при перехвате чата", e);
             }
             
-            return true; // Остальные обычные сообщения спокойно летят на сервер
+            return true; // Обычные сообщения летят как обычно
         });
 
-        // 2. ЧТЕНИЕ БАЛАНСА ИЗ ЧАТА
+        // 2. ЧТЕНИЕ БАЛАНСА ИЗ СЕРВЕРНОГО ЧАТА
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
             
             if (text.contains("Баланс:") || text.toLowerCase().contains("balance")) {
-                try {
-                    String nums = text.replaceAll("[^0-9]", "");
-                    if (!nums.isEmpty()) {
-                        currentBalance = Long.parseLong(nums);
-                        sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
-                        
-                        if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
-                            sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
-                            setState(BotState.REST);
-                            setWait(6000); // Слип на 5 минут
-                        } else {
-                            setState(BotState.OPEN_AH);
-                            setWait(40);
+                MinecraftClient.getInstance().execute(() -> {
+                    try {
+                        String nums = text.replaceAll("[^0-9]", "");
+                        if (!nums.isEmpty()) {
+                            currentBalance = Long.parseLong(nums);
+                            sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
+                            
+                            if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
+                                sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
+                                setState(BotState.REST);
+                                setWait(6000); // Отдых 5 минут
+                            } else {
+                                setState(BotState.OPEN_AH);
+                                setWait(40);
+                            }
                         }
+                    } catch (Exception e) {
+                        sendMsg("Ошибка парсинга баланса.", Formatting.RED);
                     }
-                } catch (Exception e) {
-                    sendMsg("Ошибка парсинга баланса.", Formatting.RED);
-                }
+                });
             }
         });
 
@@ -122,12 +135,12 @@ public class ExampleMod implements ModInitializer {
                 case SCAN_AH:
                     if (client.currentScreen instanceof HandledScreen<?>) {
                         sendMsg("Анализ рынка...", Formatting.AQUA);
-                        // Заглушка: временно целимся на 11 слот для проверки
+                        // Хардкод для теста (11 слот), позже сюда вставим парсер Lore
                         targetSlotId = 11; 
                         medianPrice = 10000; 
                         observeAttempts = 0;
                         setState(BotState.OBSERVE);
-                        setWait(200);
+                        setWait(200); // Ждем 10 сек
                     } else {
                         sendMsg("GUI аукциона не открылось. Пробую снова.", Formatting.RED);
                         setState(BotState.OPEN_AH);
@@ -166,23 +179,23 @@ public class ExampleMod implements ModInitializer {
                         client.interactionManager.clickSlot(
                             screen.getScreenHandler().syncId,
                             targetSlotId,
-                            0,
+                            0, // ЛКМ
                             net.minecraft.screen.slot.SlotActionType.PICKUP,
                             client.player
                         );
                     }
                     setState(BotState.SELL_ITEM);
                     setWait(40);
-                    client.setScreen(null);
+                    client.setScreen(null); // Закрываем GUI чтобы освободить руки
                     break;
 
                 case SELL_ITEM:
                     long sellPrice = (long) (medianPrice * 1.05);
-                    if (sellPrice <= 0) sellPrice = 50000;
+                    if (sellPrice <= 0) sellPrice = 50000; // На всякий случай
                     sendMsg("Выставляю купленный товар за: " + sellPrice, Formatting.GREEN);
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
                     setState(BotState.CHECK_BALANCE);
-                    setWait(60);
+                    setWait(60); // Ждем 3 сек перед новым кругом
                     break;
 
                 case REST:
@@ -197,18 +210,21 @@ public class ExampleMod implements ModInitializer {
     }
 
     private void setWait(int ticks) {
+        // Микро-рандомизация таймингов против анти-чита
         this.waitTicks = ticks + (int)(Math.random() * 10);
     }
 
-    // Рабочая система вывода сообщений для 1.21+
+    // Безопасный вывод сообщений на клиентский экран
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
-            client.player.sendMessage(
-                Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
-                .append(Text.literal(msg).formatted(color)), 
-                false
-            );
+            client.execute(() -> {
+                client.player.sendMessage(
+                    Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
+                    .append(Text.literal(msg).formatted(color)), 
+                    false
+                );
+            });
         }
     }
 }
