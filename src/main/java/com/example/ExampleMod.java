@@ -11,7 +11,7 @@ import net.minecraft.text.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class AutoBuyMod implements ModInitializer {
+public class ExampleMod implements ModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
@@ -33,8 +33,11 @@ public class AutoBuyMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        LOGGER.info("AutoBuy mod initialized.");
+
         // 1. Инициализация и настройка (Перехват чата)
-        ClientSendMessageEvents.CHAT.register(message -> {
+        // Используем ALLOW_CHAT, чтобы возвращать false и не давать команде уйти на сервер
+        ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
             if (message.startsWith(".startbot")) {
                 isActive = !isActive;
                 sendClientMessage("Автобай " + (isActive ? "§aВКЛЮЧЕН" : "§cВЫКЛЮЧЕН"));
@@ -58,7 +61,7 @@ public class AutoBuyMod implements ModInitializer {
                 }
                 return false; // Блокируем отправку на сервер
             }
-            return true;
+            return true; // Разрешаем отправку остальных сообщений
         });
 
         // 2. Сканирование баланса (Парсинг входящих сообщений)
@@ -88,7 +91,7 @@ public class AutoBuyMod implements ModInitializer {
             }
         });
 
-        // Основной цикл машины состояний
+        // 3. Основной цикл машины состояний
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (!isActive || client.player == null) return;
 
@@ -118,13 +121,13 @@ public class AutoBuyMod implements ModInitializer {
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
                         sendClientMessage("Анализ рынка...");
                         
-                        // TODO: Здесь нужен парсинг NBT/Lore слотов
+                        // TODO: Здесь будет парсинг NBT/Lore слотов
                         // 1. Пройтись по screen.getScreenHandler().slots
                         // 2. Собрать цены из Lore предметов (item.getTooltip())
                         // 3. Вычислить медиану (ММЦ)
-                        // 4. Найти самый дешевый слот (targetSlotId = ...; medianPrice = ...;)
+                        // 4. Найти самый дешевый слот
 
-                        // Симуляция успешного нахождения лота Л1:
+                        // Пока симулируем успешное нахождение лота Л1:
                         targetSlotId = 11; // Допустим, 11 слот
                         observeAttempts = 0;
                         setState(BotState.OBSERVE);
