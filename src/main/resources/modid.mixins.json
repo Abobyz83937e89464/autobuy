@@ -2,7 +2,10 @@
   "required": true,
   "package": "com.example.mixin",
   "compatibilityLevel": "JAVA_21",
+  "refmap": "autobuy.refmap.json",
   "mixins": [],
-  "client": [],
+  "client": [
+    "ExampleMixin"
+  ],
   "server": []
 }
