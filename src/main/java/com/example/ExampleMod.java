@@ -8,6 +8,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,7 +23,6 @@ public class ExampleMod implements ModInitializer {
     private BotState currentState = BotState.IDLE;
     private int waitTicks = 0;
 
-    // Переменные для алгоритма скальпинга
     private int targetSlotId = -1;
     private long medianPrice = 0;
     private int observeAttempts = 0;
@@ -35,67 +35,70 @@ public class ExampleMod implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("AutoBuy mod initialized.");
 
-        // 1. Инициализация и настройка (Перехват чата)
-        // Используем ALLOW_CHAT, чтобы возвращать false и не давать команде уйти на сервер
+        // 1. ПЕРЕХВАТ ЧАТА ДЛЯ КОМАНД С ТОЧКОЙ (.)
         ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
+            // Обрабатываем .startbot
             if (message.startsWith(".startbot")) {
                 isActive = !isActive;
-                sendClientMessage("Автобай " + (isActive ? "§aВКЛЮЧЕН" : "§cВЫКЛЮЧЕН"));
+                sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"), isActive ? Formatting.GREEN : Formatting.RED);
                 if (isActive) {
                     setState(BotState.CHECK_BALANCE);
                 } else {
                     setState(BotState.IDLE);
                 }
-                return false; // Блокируем отправку на сервер
+                return false; // Отменяем отправку на сервер
             }
 
+            // Обрабатываем .botmax
             if (message.startsWith(".botmax")) {
                 try {
                     String[] parts = message.split(" ");
                     if (parts.length > 1) {
                         maxBudget = Long.parseLong(parts[1]);
-                        sendClientMessage("Максимальный бюджет установлен: §e" + maxBudget);
+                        sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
+                    } else {
+                        sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED);
                     }
                 } catch (NumberFormatException e) {
-                    sendClientMessage("§cОшибка: введите число. Пример: .botmax 250000");
+                    sendMsg("Ошибка: введите число. Пример: .botmax 250000", Formatting.RED);
                 }
-                return false; // Блокируем отправку на сервер
+                return false; // Отменяем отправку на сервер
             }
-            return true; // Разрешаем отправку остальных сообщений
+            
+            return true; // Остальные обычные сообщения спокойно летят на сервер
         });
 
-        // 2. Сканирование баланса (Парсинг входящих сообщений)
+        // 2. ЧТЕНИЕ БАЛАНСА ИЗ ЧАТА
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
             
-            // TODO: Подставить точное слово, которое пишет FunTime при /money
             if (text.contains("Баланс:") || text.toLowerCase().contains("balance")) {
                 try {
-                    // Извлекаем только цифры из сообщения
                     String nums = text.replaceAll("[^0-9]", "");
-                    currentBalance = Long.parseLong(nums);
-                    sendClientMessage("Баланс обновлен: §e" + currentBalance);
-                    
-                    if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
-                        sendClientMessage("§cМало денег. Ухожу в слип.");
-                        setState(BotState.REST);
-                        setWait(6000); // 5 минут отдыха (20 tps * 300)
-                    } else {
-                        setState(BotState.OPEN_AH);
-                        setWait(40); // Ждем 2 сек перед открытием аукциона
+                    if (!nums.isEmpty()) {
+                        currentBalance = Long.parseLong(nums);
+                        sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
+                        
+                        if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
+                            sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
+                            setState(BotState.REST);
+                            setWait(6000); // Слип на 5 минут
+                        } else {
+                            setState(BotState.OPEN_AH);
+                            setWait(40);
+                        }
                     }
                 } catch (Exception e) {
-                    sendClientMessage("§cОшибка парсинга баланса.");
+                    sendMsg("Ошибка парсинга баланса.", Formatting.RED);
                 }
             }
         });
 
-        // 3. Основной цикл машины состояний
+        // 3. ОСНОВНОЙ ЦИКЛ БОТА
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (!isActive || client.player == null) return;
 
-            // Обработка пауз (рандомизация таймингов)
             if (waitTicks > 0) {
                 waitTicks--;
                 return;
@@ -107,33 +110,26 @@ public class ExampleMod implements ModInitializer {
 
                 case CHECK_BALANCE:
                     client.getNetworkHandler().sendCommand("money");
-                    setWait(100); // Таймаут, если сервер не ответил
+                    setWait(100);
                     break;
 
                 case OPEN_AH:
-                    // Открываем категорию незерита
                     client.getNetworkHandler().sendCommand("ah category netherite");
                     setState(BotState.SCAN_AH);
-                    setWait(40); // Ждем пока GUI прогрузится
+                    setWait(40);
                     break;
 
                 case SCAN_AH:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        sendClientMessage("Анализ рынка...");
-                        
-                        // TODO: Здесь будет парсинг NBT/Lore слотов
-                        // 1. Пройтись по screen.getScreenHandler().slots
-                        // 2. Собрать цены из Lore предметов (item.getTooltip())
-                        // 3. Вычислить медиану (ММЦ)
-                        // 4. Найти самый дешевый слот
-
-                        // Пока симулируем успешное нахождение лота Л1:
-                        targetSlotId = 11; // Допустим, 11 слот
+                    if (client.currentScreen instanceof HandledScreen<?>) {
+                        sendMsg("Анализ рынка...", Formatting.AQUA);
+                        // Заглушка: временно целимся на 11 слот для проверки
+                        targetSlotId = 11; 
+                        medianPrice = 10000; 
                         observeAttempts = 0;
                         setState(BotState.OBSERVE);
-                        setWait(200); // Шаг Б: Пауза 10 секунд (20 tps * 10)
+                        setWait(200);
                     } else {
-                        sendClientMessage("§cGUI аукциона не открылось. Повтор.");
+                        sendMsg("GUI аукциона не открылось. Пробую снова.", Formatting.RED);
                         setState(BotState.OPEN_AH);
                         setWait(60);
                     }
@@ -141,61 +137,55 @@ public class ExampleMod implements ModInitializer {
 
                 case OBSERVE:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        Slot targetSlot = screen.getScreenHandler().slots.get(targetSlotId);
-                        
-                        // Проверяем, купили ли лот Л1 за эти 10 секунд
-                        if (!targetSlot.hasStack()) {
-                            sendClientMessage("§aЛ1 исчез (куплен)! Спрос подтвержден. Ищу Л2.");
-                            // TODO: Найти следующий слот ниже ММЦ и обновить targetSlotId
-                            setState(BotState.BUY_ITEM);
-                        } else {
-                            observeAttempts++;
-                            if (observeAttempts < 3) {
-                                sendClientMessage("Л1 на месте. Жду еще 10 сек...");
-                                // TODO: Переключиться на следующий лот для проверки
-                                setWait(200); 
+                        if (targetSlotId >= 0 && targetSlotId < screen.getScreenHandler().slots.size()) {
+                            Slot targetSlot = screen.getScreenHandler().slots.get(targetSlotId);
+                            
+                            if (!targetSlot.hasStack()) {
+                                sendMsg("Лот исчез! Спрос подтвержден. Идем покупать.", Formatting.GREEN);
+                                setState(BotState.BUY_ITEM);
                             } else {
-                                sendClientMessage("§eСпроса нет. Никто ничего не купил. Перекур.");
-                                setState(BotState.REST);
-                                setWait(2400 + (int)(Math.random() * 2400)); // Рандом 2-4 мин
+                                observeAttempts++;
+                                if (observeAttempts < 3) {
+                                    sendMsg("Лот еще на месте. Жду еще 10 сек...", Formatting.YELLOW);
+                                    setWait(200); 
+                                } else {
+                                    sendMsg("Спроса нет. Никто не берет. Перекур.", Formatting.GOLD);
+                                    setState(BotState.REST);
+                                    setWait(2400 + (int)(Math.random() * 1200));
+                                }
                             }
                         }
                     } else {
-                        setState(BotState.OPEN_AH); // Если закрылось — открываем заново
+                        setState(BotState.OPEN_AH);
                     }
                     break;
 
                 case BUY_ITEM:
-                    sendClientMessage("§aПокупаю лот!");
+                    sendMsg("Кликаю по лоту (покупка)!", Formatting.GREEN);
                     if (client.interactionManager != null && client.currentScreen instanceof HandledScreen<?> screen) {
-                        // Эмуляция клика по слоту. Формат: (syncId, slotId, button, actionType, player)
                         client.interactionManager.clickSlot(
                             screen.getScreenHandler().syncId,
                             targetSlotId,
-                            0, // Левый клик
+                            0,
                             net.minecraft.screen.slot.SlotActionType.PICKUP,
                             client.player
                         );
                     }
                     setState(BotState.SELL_ITEM);
-                    setWait(40); // Ждем 2 сек на обработку покупки сервером
-                    client.setScreen(null); // Закрываем GUI
+                    setWait(40);
+                    client.setScreen(null);
                     break;
 
                 case SELL_ITEM:
-                    // Берем предмет (должен упасть в инвентарь)
-                    long sellPrice = (long) (medianPrice * 1.05); // Цена ММЦ + 5%
-                    sendClientMessage("§aВыставляю товар за: §e" + sellPrice);
-                    
-                    // Убеждаемся, что предмет в руке (опционально: переложить в хотбар пакетом)
+                    long sellPrice = (long) (medianPrice * 1.05);
+                    if (sellPrice <= 0) sellPrice = 50000;
+                    sendMsg("Выставляю купленный товар за: " + sellPrice, Formatting.GREEN);
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
-                    
-                    setState(BotState.CHECK_BALANCE); // Цикл замыкается
+                    setState(BotState.CHECK_BALANCE);
                     setWait(60);
                     break;
 
                 case REST:
-                    // Состояние отдыха
                     setState(BotState.CHECK_BALANCE);
                     break;
             }
@@ -207,14 +197,18 @@ public class ExampleMod implements ModInitializer {
     }
 
     private void setWait(int ticks) {
-        // Добавляем микро-рандомизацию к задержке (анти-детект)
         this.waitTicks = ticks + (int)(Math.random() * 10);
     }
 
-    private void sendClientMessage(String msg) {
+    // Рабочая система вывода сообщений для 1.21+
+    private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
-            client.player.sendMessage(Text.literal("§8[§6AutoBuy§8] §f" + msg), false);
+            client.player.sendMessage(
+                Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
+                .append(Text.literal(msg).formatted(color)), 
+                false
+            );
         }
     }
 }
