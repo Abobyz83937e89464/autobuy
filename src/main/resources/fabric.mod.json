@@ -1,18 +1,14 @@
 {
   "schema_version": 1,
-  "id": "modid",
+  "id": "autobuy",
   "version": "1.0.0",
-  "name": "Example Mod",
-  "description": "Mod description here.",
+  "name": "AutoBuy",
+  "description": "AutoBuy mod",
   "authors": [
-    "Author"
+    "Developer"
   ],
-  "contact": {
-    "homepage": "https://fabricmc.net/",
-    "sources": "https://github.com/FabricMC/fabric-example-mod"
-  },
+  "contact": {},
   "license": "CC0-1.0",
-  "icon": "assets/modid/icon.png",
   "environment": "*",
   "entrypoints": {
     "main": [
@@ -20,7 +16,7 @@
     ]
   },
   "mixins": [
-    "modid.mixins.json"
+    "autobuy.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.16.0",
