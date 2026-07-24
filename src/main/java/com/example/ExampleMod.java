@@ -1,6 +1,6 @@
 package com.example;
 
-import net.fabricmc.api.ModInitializer;
+import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -14,7 +14,7 @@ import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class ExampleMod implements ModInitializer {
+public class ExampleMod implements ClientModInitializer {  // <-- было ModInitializer
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
@@ -28,7 +28,6 @@ public class ExampleMod implements ModInitializer {
     private long medianPrice = 0;
     private int observeAttempts = 0;
 
-    // Клавиша U для активации/деактивации
     private static KeyBinding toggleKey;
 
     enum BotState {
@@ -36,38 +35,19 @@ public class ExampleMod implements ModInitializer {
     }
 
     @Override
-    public void onInitialize() {
+    public void onInitializeClient() {  // <-- было onInitialize
         LOGGER.info("AutoBuy mod initialized.");
 
-        // Регистрация клавиши
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.autobuy.toggle", // translation key
-            GLFW.GLFW_KEY_U,      // клавиша U
-            "category.autobuy"    // категория в настройках управления
+            "key.autobuy.toggle",
+            GLFW.GLFW_KEY_U,
+            "category.autobuy"
         ));
 
-        // Обработка нажатия клавиши
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            // Проверяем, что интерфейс закрыт (чтобы не переключаться при вводе текста)
-            if (client.currentScreen == null && toggleKey.wasPressed()) {
-                isActive = !isActive;
-                if (isActive) {
-                    sendMsg("Бот активирован", Formatting.GREEN);
-                    setState(BotState.CHECK_BALANCE);
-                    waitTicks = 0;
-                } else {
-                    sendMsg("Бот деактивирован", Formatting.RED);
-                    setState(BotState.IDLE);
-                    waitTicks = 0;
-                }
-            }
-        });
-
-        // Чтение баланса из серверного чата
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
-            
+
             if (text.contains("Баланс:") || text.toLowerCase().contains("balance")) {
                 MinecraftClient.getInstance().execute(() -> {
                     try {
@@ -75,7 +55,7 @@ public class ExampleMod implements ModInitializer {
                         if (!nums.isEmpty()) {
                             currentBalance = Long.parseLong(nums);
                             sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
-                            
+
                             if (currentBalance <= 0) {
                                 sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
                                 setState(BotState.REST);
@@ -92,9 +72,25 @@ public class ExampleMod implements ModInitializer {
             }
         });
 
-        // Основной цикл бота
+        // Один хендлер вместо двух — кейбайнд + логика бота
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (!isActive || client.player == null) return;
+            if (client.player == null) return;
+
+            // while вместо if — правильный паттерн для wasPressed в Fabric
+            while (toggleKey.wasPressed()) {
+                isActive = !isActive;
+                if (isActive) {
+                    sendMsg("Бот активирован", Formatting.GREEN);
+                    setState(BotState.CHECK_BALANCE);
+                    waitTicks = 0;
+                } else {
+                    sendMsg("Бот деактивирован", Formatting.RED);
+                    setState(BotState.IDLE);
+                    waitTicks = 0;
+                }
+            }
+
+            if (!isActive) return;
 
             if (waitTicks > 0) {
                 waitTicks--;
@@ -119,8 +115,8 @@ public class ExampleMod implements ModInitializer {
                 case SCAN_AH:
                     if (client.currentScreen instanceof HandledScreen<?>) {
                         sendMsg("Анализ рынка...", Formatting.AQUA);
-                        targetSlotId = 11; 
-                        medianPrice = 10000; 
+                        targetSlotId = 11;
+                        medianPrice = 10000;
                         observeAttempts = 0;
                         setState(BotState.OBSERVE);
                         setWait(200);
@@ -135,7 +131,6 @@ public class ExampleMod implements ModInitializer {
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
                         if (targetSlotId >= 0 && targetSlotId < screen.getScreenHandler().slots.size()) {
                             Slot targetSlot = screen.getScreenHandler().slots.get(targetSlotId);
-                            
                             if (!targetSlot.hasStack()) {
                                 sendMsg("Лот исчез! Спрос подтвержден. Идем покупать.", Formatting.GREEN);
                                 setState(BotState.BUY_ITEM);
@@ -143,7 +138,7 @@ public class ExampleMod implements ModInitializer {
                                 observeAttempts++;
                                 if (observeAttempts < 3) {
                                     sendMsg("Лот еще на месте. Жду еще 10 сек...", Formatting.YELLOW);
-                                    setWait(200); 
+                                    setWait(200);
                                 } else {
                                     sendMsg("Спроса нет. Никто не берет. Перекур.", Formatting.GOLD);
                                     setState(BotState.REST);
@@ -173,7 +168,7 @@ public class ExampleMod implements ModInitializer {
                     break;
 
                 case SELL_ITEM:
-                    long sellPrice = (long) (medianPrice * 1.05);
+                    long sellPrice = (long)(medianPrice * 1.05);
                     if (sellPrice <= 0) sellPrice = 50000;
                     sendMsg("Выставляю купленный товар за: " + sellPrice, Formatting.GREEN);
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
@@ -199,13 +194,11 @@ public class ExampleMod implements ModInitializer {
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
-            client.execute(() -> {
-                client.player.sendMessage(
-                    Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
-                    .append(Text.literal(msg).formatted(color)), 
-                    false
-                );
-            });
+            client.execute(() -> client.player.sendMessage(
+                Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
+                    .append(Text.literal(msg).formatted(color)),
+                false
+            ));
         }
     }
 }
