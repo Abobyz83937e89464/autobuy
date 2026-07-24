@@ -1,22 +1,29 @@
 {
-  "schema_version": 1,
+  "schemaVersion": 1,
   "id": "autobuy",
   "version": "1.0.0",
   "name": "AutoBuy",
-  "description": "AutoBuy mod",
-  "authors": ["mprpheus"],
+  "description": "AutoBuy Bot",
+  "authors": [],
   "contact": {},
-  "license": "CC0-1.0",
+  "license": "MIT",
+  "icon": "assets/modid/icon.png",
   "environment": "client",
   "entrypoints": {
+    "main": [
+      "com.example.ExampleMod"
+    ],
     "client": [
       "com.example.ExampleMod"
     ]
   },
+  "mixins": [
+    "autobuy.mixins.json"
+  ],
   "depends": {
-    "fabricloader": ">=0.16.0",
-    "minecraft": "~1.21.4",
-    "java": ">=21",
+    "fabricloader": ">=0.14.0",
+    "minecraft": "*",
+    "java": ">=17",
     "fabric-api": "*"
   }
 }
