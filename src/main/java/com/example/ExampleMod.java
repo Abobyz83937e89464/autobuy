@@ -39,18 +39,19 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     enum BotState {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, EVALUATE,
-        PROCESS_TARGET, MARKET_GUI, FIND_AND_BUY, BUY_ITEM, SELL_TO_MARKET, SELL_TO_AH
+        PROCESS_TARGET, MARKET_GUI, FIND_AND_BUY, BUY_ITEM, CONFIRM_BUY,
+        SELL_TO_MARKET, SELL_TO_AH
     }
 
     private final Map<String, List<Long>> priceSamples = new HashMap<>();
-    private final Map<String, Long> marketPrices = new HashMap<>(); // средняя цена на ауке
+    private final Map<String, Long> marketPrices = new HashMap<>();
     private final Map<String, Integer> itemCounts = new HashMap<>();
 
     private static class Target {
         String name;
-        long maxPrice;         // аукционная цена, по которой покупаем
-        long marketUnitPrice;  // цена за штуку с маркета (для руды/блоков)
-        boolean isMarketItem;  // true = продаём через /market
+        long maxPrice;
+        long marketUnitPrice;
+        boolean isMarketItem;
     }
     private final List<Target> targets = new ArrayList<>();
     private int currentTargetIndex = 0;
@@ -63,20 +64,17 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int nextPageSlotId = -1;
     private boolean huntingMode = false;
 
-    // Для обработки маркета
     private int marketAttempts = 0;
     private static final int MAX_MARKET_ATTEMPTS = 2;
     private int marketGuiWaitTicks = 0;
 
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
-    // Чёрный список низкоуровневой брони, инструментов, удочек
     private static final Set<String> BLACKLIST_KEYWORDS = Set.of(
         "кожан", "железн", "золот", "каменн", "деревянн", "цепн", "кольчуг",
         "удочк", "fishing rod", "bow"
     );
 
-    // Ключевые слова для товаров, проверяемых через /market
     private static final Set<String> MARKET_KEYWORDS = Set.of(
         "лазурит", "lapis", "алмаз", "diamond", "изумруд", "emerald",
         "золото", "gold", "железо", "iron", "медь", "copper",
@@ -108,7 +106,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
-        // Обработчик чата (только баланс)
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive) return;
             String text = message.getString();
@@ -118,7 +115,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Основной такт
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -246,7 +242,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             marketAttempts = 0;
                             client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
                             setState(BotState.MARKET_GUI);
-                            marketGuiWaitTicks = 10; // ускорено до 0.5 сек (10 тиков)
+                            marketGuiWaitTicks = 10;
                             setWait(marketGuiWaitTicks);
                         } else {
                             huntingMode = true;
@@ -337,17 +333,38 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                                     net.minecraft.screen.slot.SlotActionType.PICKUP,
                                     client.player
                             );
-                            sendMsg("Куплен " + buyItemName + " за " + buyPrice, Formatting.GREEN);
+                            sendMsg("Первый клик по лоту: " + buyItemName, Formatting.GREEN);
                         }
-                        if (currentTarget != null && currentTarget.isMarketItem) {
-                            setState(BotState.SELL_TO_MARKET);
-                        } else {
-                            setState(BotState.SELL_TO_AH);
-                        }
-                        setWait(10);
+                        // Переходим к подтверждению – клик по первому слоту
+                        setState(BotState.CONFIRM_BUY);
+                        setWait(8); // даём GUI обновиться
                     } else {
                         advanceTarget();
                     }
+                    break;
+
+                case CONFIRM_BUY:
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        int confirmSlot = 0; // первый слот, куда перемещается предмет для подтверждения
+                        if (confirmSlot < screen.getScreenHandler().slots.size()) {
+                            client.interactionManager.clickSlot(
+                                    screen.getScreenHandler().syncId,
+                                    confirmSlot,
+                                    0,
+                                    net.minecraft.screen.slot.SlotActionType.PICKUP,
+                                    client.player
+                            );
+                            sendMsg("Подтверждение покупки (слот 0)", Formatting.AQUA);
+                        }
+                        // После подтверждения закрываем GUI и идём продавать
+                        client.setScreen(null);
+                    }
+                    if (currentTarget != null && currentTarget.isMarketItem) {
+                        setState(BotState.SELL_TO_MARKET);
+                    } else {
+                        setState(BotState.SELL_TO_AH);
+                    }
+                    setWait(10);
                     break;
 
                 case SELL_TO_MARKET:
@@ -359,7 +376,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;
 
                 case SELL_TO_AH:
-                    // Новая прогрессивная наценка от цены покупки
                     long sellPrice;
                     if (buyPrice < 10_000) {
                         sellPrice = (long)(buyPrice * 1.7);
@@ -370,7 +386,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     } else {
                         sellPrice = (long)(buyPrice * 1.15);
                     }
-                    if (sellPrice <= 0) sellPrice = 50000; // страховка
+                    if (sellPrice <= 0) sellPrice = 50000;
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
                     sendMsg("Выставляю " + buyItemName + " за " + sellPrice, Formatting.GREEN);
                     advanceTarget();
