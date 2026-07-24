@@ -2,9 +2,11 @@ package com.example;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
@@ -17,9 +19,11 @@ public class ExampleMod implements ClientModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
+    // Добавляем переменную для нашего бинда
+    private static KeyBinding toggleKey;
+
     private boolean isActive = false;
     private long currentBalance = 0;
-    private boolean keyWasDown = false;
 
     private BotState currentState = BotState.IDLE;
     private int waitTicks = 0;
@@ -35,6 +39,14 @@ public class ExampleMod implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         LOGGER.info("AutoBuy mod initialized.");
+
+        // Регистрируем кнопку U
+        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.autobuy.toggle", // Уникальное имя (можно перевести в языковом файле)
+                InputUtil.Type.KEYSYM, // Тип инпута (кнопка клавиатуры)
+                GLFW.GLFW_KEY_U, // Сама кнопка
+                "category.autobuy.main" // Категория в настройках управления
+        ));
 
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
@@ -66,14 +78,8 @@ public class ExampleMod implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
-            // Читаем GLFW напрямую — надежнее KeyBinding.wasPressed()
-            boolean isKeyDown = InputUtil.isKeyPressed(
-                client.getWindow().getHandle(),
-                GLFW.GLFW_KEY_U
-            );
-
-            // rising edge — срабатывает один раз при нажатии
-            if (isKeyDown && !keyWasDown) {
+            // Правильная проверка нажатия кнопки. wasPressed() срабатывает один раз при нажатии.
+            while (toggleKey.wasPressed()) {
                 isActive = !isActive;
                 if (isActive) {
                     sendMsg("Бот активирован", Formatting.GREEN);
@@ -85,7 +91,6 @@ public class ExampleMod implements ClientModInitializer {
                     waitTicks = 0;
                 }
             }
-            keyWasDown = isKeyDown;
 
             if (!isActive) return;
 
@@ -139,7 +144,7 @@ public class ExampleMod implements ClientModInitializer {
                                 } else {
                                     sendMsg("Спроса нет. Никто не берет. Перекур.", Formatting.GOLD);
                                     setState(BotState.REST);
-                                    setWait(2400 + (int)(Math.random() * 1200));
+                                    setWait(2400 + (int) (Math.random() * 1200));
                                 }
                             }
                         }
@@ -152,11 +157,11 @@ public class ExampleMod implements ClientModInitializer {
                     sendMsg("Кликаю по лоту (покупка)!", Formatting.GREEN);
                     if (client.interactionManager != null && client.currentScreen instanceof HandledScreen<?> screen) {
                         client.interactionManager.clickSlot(
-                            screen.getScreenHandler().syncId,
-                            targetSlotId,
-                            0,
-                            net.minecraft.screen.slot.SlotActionType.PICKUP,
-                            client.player
+                                screen.getScreenHandler().syncId,
+                                targetSlotId,
+                                0,
+                                net.minecraft.screen.slot.SlotActionType.PICKUP,
+                                client.player
                         );
                     }
                     setState(BotState.SELL_ITEM);
@@ -165,7 +170,7 @@ public class ExampleMod implements ClientModInitializer {
                     break;
 
                 case SELL_ITEM:
-                    long sellPrice = (long)(medianPrice * 1.05);
+                    long sellPrice = (long) (medianPrice * 1.05);
                     if (sellPrice <= 0) sellPrice = 50000;
                     sendMsg("Выставляю купленный товар за: " + sellPrice, Formatting.GREEN);
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
@@ -185,16 +190,16 @@ public class ExampleMod implements ClientModInitializer {
     }
 
     private void setWait(int ticks) {
-        this.waitTicks = ticks + (int)(Math.random() * 10);
+        this.waitTicks = ticks + (int) (Math.random() * 10);
     }
 
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.execute(() -> client.player.sendMessage(
-                Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
-                    .append(Text.literal(msg).formatted(color)),
-                false
+                    Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
+                            .append(Text.literal(msg).formatted(color)),
+                    false
             ));
         }
     }
