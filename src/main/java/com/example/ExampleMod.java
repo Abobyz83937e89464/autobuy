@@ -11,8 +11,8 @@ import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.tooltip.TooltipContext;
 import net.minecraft.item.tooltip.TooltipType;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
@@ -268,7 +268,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-        List<Text> lore = stack.getTooltip(TooltipContext.EMPTY, client.player, TooltipType.Default.BASIC);
+        List<Text> lore = stack.getTooltip(Item.TooltipContext.EMPTY, client.player, TooltipType.Default.BASIC);
         for (Text line : lore) {
             String text = line.getString().toLowerCase();
             if (text.contains("цена:") || text.contains("price:")) {
@@ -301,4 +301,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-                           }
+                }
