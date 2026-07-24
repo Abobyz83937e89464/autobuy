@@ -11,8 +11,10 @@ import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.component.type.MapIdComponent;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.map.MapState;
 import net.minecraft.item.tooltip.TooltipType;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
@@ -268,10 +270,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-        // Анонимная реализация TooltipContext (обычный просмотр, не креатив)
+        // Полная анонимная реализация TooltipContext со всеми методами
         List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
             public boolean isAdvanced() { return false; }
             public boolean isCreative() { return false; }
+            public MapState getMapState(MapIdComponent id) { return null; }
         }, client.player, TooltipType.Default.BASIC);
         for (Text line : lore) {
             String text = line.getString().toLowerCase();
@@ -305,4 +308,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-}
+                    }
