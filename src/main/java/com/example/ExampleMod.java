@@ -3,10 +3,9 @@ package com.example;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
-import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -14,12 +13,13 @@ import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class ExampleMod implements ClientModInitializer {  // <-- было ModInitializer
+public class ExampleMod implements ClientModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private boolean isActive = false;
     private long currentBalance = 0;
+    private boolean keyWasDown = false;
 
     private BotState currentState = BotState.IDLE;
     private int waitTicks = 0;
@@ -28,21 +28,13 @@ public class ExampleMod implements ClientModInitializer {  // <-- было ModIn
     private long medianPrice = 0;
     private int observeAttempts = 0;
 
-    private static KeyBinding toggleKey;
-
     enum BotState {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_AH, OBSERVE, BUY_ITEM, SELL_ITEM, REST
     }
 
     @Override
-    public void onInitializeClient() {  // <-- было onInitialize
+    public void onInitializeClient() {
         LOGGER.info("AutoBuy mod initialized.");
-
-        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.autobuy.toggle",
-            GLFW.GLFW_KEY_U,
-            "category.autobuy"
-        ));
 
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
@@ -55,7 +47,6 @@ public class ExampleMod implements ClientModInitializer {  // <-- было ModIn
                         if (!nums.isEmpty()) {
                             currentBalance = Long.parseLong(nums);
                             sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
-
                             if (currentBalance <= 0) {
                                 sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
                                 setState(BotState.REST);
@@ -72,12 +63,17 @@ public class ExampleMod implements ClientModInitializer {  // <-- было ModIn
             }
         });
 
-        // Один хендлер вместо двух — кейбайнд + логика бота
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
-            // while вместо if — правильный паттерн для wasPressed в Fabric
-            while (toggleKey.wasPressed()) {
+            // Читаем GLFW напрямую — надежнее KeyBinding.wasPressed()
+            boolean isKeyDown = InputUtil.isKeyPressed(
+                client.getWindow().getHandle(),
+                GLFW.GLFW_KEY_U
+            );
+
+            // rising edge — срабатывает один раз при нажатии
+            if (isKeyDown && !keyWasDown) {
                 isActive = !isActive;
                 if (isActive) {
                     sendMsg("Бот активирован", Formatting.GREEN);
@@ -89,6 +85,7 @@ public class ExampleMod implements ClientModInitializer {  // <-- было ModIn
                     waitTicks = 0;
                 }
             }
+            keyWasDown = isKeyDown;
 
             if (!isActive) return;
 
