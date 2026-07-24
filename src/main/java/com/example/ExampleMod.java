@@ -39,10 +39,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     enum BotState {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, EVALUATE,
-        PROCESS_TARGET, CHECK_MARKET, FIND_AND_BUY, BUY_ITEM, SELL_TO_MARKET, SELL_TO_AH
+        PROCESS_TARGET, MARKET_GUI, FIND_AND_BUY, BUY_ITEM, SELL_TO_MARKET, SELL_TO_AH
     }
 
-    // Хранилище данных прохода
     private final Map<String, List<Long>> priceSamples = new HashMap<>();
     private final Map<String, Long> marketPrices = new HashMap<>(); // средняя цена на ауке
     private final Map<String, Integer> itemCounts = new HashMap<>();
@@ -67,6 +66,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     // Для обработки маркета
     private int marketAttempts = 0;
     private static final int MAX_MARKET_ATTEMPTS = 2;
+    private int marketGuiWaitTicks = 0;
 
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
@@ -108,24 +108,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
-        // Обработчик чата
+        // Только для баланса – остальное теперь через GUI
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive) return;
             String text = message.getString();
-
             if (currentState == BotState.CHECK_BALANCE &&
                 (text.toLowerCase().contains("balance") || text.toLowerCase().contains("баланс"))) {
                 MinecraftClient.getInstance().execute(() -> parseBalance(text));
             }
-            else if (currentState == BotState.CHECK_MARKET) {
-                // Ищем "минимальная цена" (без привязки к двоеточию)
-                if (text.toLowerCase().contains("минимальная цена")) {
-                    MinecraftClient.getInstance().execute(() -> parseMarketPrice(text));
-                }
-            }
         });
 
-        // Основной такт
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -252,8 +244,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         if (currentTarget.isMarketItem) {
                             marketAttempts = 0;
                             client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
-                            setState(BotState.CHECK_MARKET);
-                            setWait(200); // увеличенный таймаут
+                            setState(BotState.MARKET_GUI);
+                            marketGuiWaitTicks = 200; // ждём открытия GUI до 10 секунд
+                            setWait(marketGuiWaitTicks);
                         } else {
                             huntingMode = true;
                             client.getNetworkHandler().sendCommand("ah");
@@ -263,16 +256,48 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     }
                     break;
 
-                case CHECK_MARKET:
-                    // Таймаут или ответ не получен — пробуем ещё раз
-                    if (marketAttempts < MAX_MARKET_ATTEMPTS - 1) {
-                        marketAttempts++;
-                        sendMsg("Повторная попытка /market search для " + currentTarget.name, Formatting.YELLOW);
-                        MinecraftClient.getInstance().getNetworkHandler().sendCommand("market search " + currentTarget.name);
-                        setWait(200);
+                case MARKET_GUI:
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        // GUI открылся, сканируем
+                        long unitPrice = scanMarketGui(screen);
+                        if (unitPrice > 0) {
+                            currentTarget.marketUnitPrice = unitPrice;
+                            sendMsg("Маркет цена за шт: " + unitPrice, Formatting.AQUA);
+                            if (unitPrice > currentTarget.maxPrice) {
+                                sendMsg("Маркет дороже аукциона, покупаем!", Formatting.GREEN);
+                                client.setScreen(null); // закрываем GUI маркета
+                                huntingMode = true;
+                                client.getNetworkHandler().sendCommand("ah");
+                                setState(BotState.FIND_AND_BUY);
+                                setWait(15);
+                            } else {
+                                sendMsg("Маркет цена не выше аукциона, пропускаем.", Formatting.RED);
+                                client.setScreen(null);
+                                advanceTarget();
+                            }
+                        } else {
+                            sendMsg("Не удалось извлечь цену из GUI маркета.", Formatting.RED);
+                            client.setScreen(null);
+                            advanceTarget();
+                        }
                     } else {
-                        sendMsg("Не удалось получить ответ от /market, пропускаю " + currentTarget.name, Formatting.RED);
-                        advanceTarget();
+                        // GUI не открылся, проверяем таймаут
+                        if (marketGuiWaitTicks <= 0) {
+                            if (marketAttempts < MAX_MARKET_ATTEMPTS - 1) {
+                                marketAttempts++;
+                                sendMsg("Повторная попытка /market search для " + currentTarget.name, Formatting.YELLOW);
+                                client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
+                                marketGuiWaitTicks = 200;
+                                setWait(marketGuiWaitTicks);
+                            } else {
+                                sendMsg("Не удалось открыть GUI маркета, пропускаю.", Formatting.RED);
+                                advanceTarget();
+                            }
+                        } else {
+                            // ещё ждём
+                            marketGuiWaitTicks -= waitTicks; // waitTicks уже был установлен
+                            setWait(1); // проверяем каждый тик
+                        }
                     }
                     break;
 
@@ -369,36 +394,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
-    private void parseMarketPrice(String text) {
-        if (currentTarget == null || currentState != BotState.CHECK_MARKET) return;
-        try {
-            String lower = text.toLowerCase();
-            int idx = lower.indexOf("минимальная цена");
-            if (idx == -1) return;
-            // Берём подстроку после "минимальная цена" и ищем число
-            String sub = text.substring(idx + "минимальная цена".length());
-            String nums = sub.replaceAll("[^0-9]", "");
-            if (!nums.isEmpty()) {
-                long marketPrice = Long.parseLong(nums);
-                if (marketPrice > currentTarget.maxPrice) {
-                    currentTarget.marketUnitPrice = marketPrice;
-                    sendMsg("Маркет цена: " + marketPrice + " (выше аукциона), покупаем.", Formatting.AQUA);
-                    huntingMode = true;
-                    MinecraftClient.getInstance().getNetworkHandler().sendCommand("ah");
-                    setState(BotState.FIND_AND_BUY);
-                    setWait(15);
-                } else {
-                    sendMsg("Маркет цена " + marketPrice + " не выше аукционной, пропускаем.", Formatting.RED);
-                    advanceTarget();
-                }
-            } else {
-                advanceTarget();
-            }
-        } catch (Exception e) {
-            advanceTarget();
-        }
-    }
-
     // ===================== Управление целями =====================
     private void advanceTarget() {
         currentTargetIndex++;
@@ -437,6 +432,49 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
+    /**
+     * Сканирует GUI маркета (/market search) и извлекает цену за штуку из лора предмета.
+     * Ищет строки: "минимальная цена", "цена за шт.", "unit price".
+     */
+    private long scanMarketGui(HandledScreen<?> screen) {
+        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
+            Slot slot = screen.getScreenHandler().slots.get(i);
+            if (!slot.hasStack()) continue;
+            ItemStack stack = slot.getStack();
+            long price = extractMarketUnitPrice(stack);
+            if (price > 0) return price;
+        }
+        return -1;
+    }
+
+    private long extractMarketUnitPrice(ItemStack stack) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return -1;
+        List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
+            public boolean isAdvanced() { return false; }
+            public boolean isCreative() { return false; }
+            public MapState getMapState(MapIdComponent id) { return null; }
+            public float getUpdateTickRate() { return 20.0F; }
+            public RegistryWrapper.WrapperLookup getRegistryLookup() {
+                return MinecraftClient.getInstance().player.getWorld().getRegistryManager();
+            }
+        }, client.player, TooltipType.Default.BASIC);
+        for (Text line : lore) {
+            String text = line.getString().toLowerCase();
+            if (text.contains("минимальная цена") ||
+                text.contains("цена за шт") ||
+                text.contains("unit price")) {
+                String nums = line.getString().replaceAll("[^0-9]", "");
+                if (!nums.isEmpty()) {
+                    try {
+                        return Long.parseLong(nums);
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+        return -1;
+    }
+
     private void evaluateTargets() {
         targets.clear();
 
@@ -454,7 +492,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             if (prices == null) continue;
 
             for (long auctionPrice : prices) {
-                if (auctionPrice > currentBalance) continue; // контроль баланса
+                if (auctionPrice > currentBalance) continue;
 
                 if (isTotem) {
                     if (auctionPrice >= 50000 && auctionPrice <= 100000) {
