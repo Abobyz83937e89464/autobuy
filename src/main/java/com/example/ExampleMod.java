@@ -6,9 +6,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
-import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.component.type.MapIdComponent;
@@ -40,13 +38,21 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int waitTicks = 0;
 
     enum BotState {
-        IDLE, CHECK_BALANCE, OPEN_AH, REFRESH_AH, SCAN_AH, BUY_ITEM, SELL_ITEM
+        IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, CLOSE_AH, BUY_ITEM, SELL_ITEM
     }
 
-    private final Map<String, Long> marketPrices = new HashMap<>();
+    // Хранилище данных текущего прохода
+    private final Map<String, List<Long>> priceSamples = new HashMap<>(); // все цены предмета
+    private final Map<String, Long> marketPrices = new HashMap<>(); // средняя цена
+    private final Map<String, Integer> itemCounts = new HashMap<>(); // количество лотов предмета
+
     private int buySlotId = -1;
     private String buyItemName = "";
     private long buyPrice = 0;
+
+    private int nextPageSlotId = -1; // слот кнопки "Далее"
+
+    private static final int MIN_LOTS_FOR_PURCHASE = 3; // меньше лотов — не покупаем (кроме тотемов)
 
     @Override
     public void onInitialize() {
@@ -71,6 +77,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
+        // Парсинг баланса
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
@@ -97,6 +104,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
+        // Основной такт
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -130,36 +138,70 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;
 
                 case OPEN_AH:
+                    // Сброс статистики нового прохода
+                    priceSamples.clear();
+                    marketPrices.clear();
+                    itemCounts.clear();
+                    buySlotId = -1;
+                    nextPageSlotId = -1;
+
                     client.getNetworkHandler().sendCommand("ah");
-                    setState(BotState.REFRESH_AH);
-                    setWait(30);
+                    setState(BotState.SCAN_PAGE);
+                    setWait(30); // ожидание открытия GUI
                     break;
 
-                case REFRESH_AH:
-                    if (client.currentScreen instanceof HandledScreen) {
-                        clickRefreshButton(client.currentScreen);
-                        setState(BotState.SCAN_AH);
-                        setWait(10);
+                case SCAN_PAGE:
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        // Сканируем страницу и сразу ищем, что купить
+                        boolean bought = scanAndEvaluate(screen);
+                        if (bought) {
+                            // нашли цель для покупки, переходим
+                            setState(BotState.BUY_ITEM);
+                        } else {
+                            // Ищем кнопку "Следующая страница"
+                            nextPageSlotId = findNextPageSlot(screen);
+                            if (nextPageSlotId != -1) {
+                                setState(BotState.NEXT_PAGE);
+                            } else {
+                                // страниц больше нет, закрываем аук
+                                setState(BotState.CLOSE_AH);
+                            }
+                        }
                     } else {
-                        sendMsg("Аукцион закрыт, пробую открыть снова.", Formatting.RED);
+                        // GUI закрылся (возможно, ещё не открылся), пробуем снова
+                        sendMsg("Аукцион не открыт, пробую /ah снова", Formatting.RED);
                         setState(BotState.OPEN_AH);
                         setWait(40);
                     }
                     break;
 
-                case SCAN_AH:
+                case NEXT_PAGE:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        scanAuction(screen);
-                        if (buySlotId != -1) {
-                            setState(BotState.BUY_ITEM);
+                        if (nextPageSlotId >= 0 && nextPageSlotId < screen.getScreenHandler().slots.size()) {
+                            client.interactionManager.clickSlot(
+                                screen.getScreenHandler().syncId,
+                                nextPageSlotId,
+                                0,
+                                net.minecraft.screen.slot.SlotActionType.PICKUP,
+                                client.player
+                            );
+                            sendMsg("Переход на следующую страницу...", Formatting.GRAY);
+                            setState(BotState.SCAN_PAGE);
+                            setWait(20); // подгрузка страницы
                         } else {
-                            sendMsg("Нет выгодных предложений, обновляю...", Formatting.GRAY);
-                            setState(BotState.REFRESH_AH);
-                            setWait(6);
+                            // что-то не так, уходим
+                            setState(BotState.CLOSE_AH);
                         }
                     } else {
                         setState(BotState.OPEN_AH);
                     }
+                    break;
+
+                case CLOSE_AH:
+                    client.setScreen(null);
+                    sendMsg("Закрываю аукцион, открываю заново.", Formatting.GRAY);
+                    setState(BotState.OPEN_AH);
+                    setWait(30);
                     break;
 
                 case BUY_ITEM:
@@ -191,33 +233,25 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     buySlotId = -1;
                     buyItemName = "";
                     buyPrice = 0;
-                    setState(BotState.REFRESH_AH);
+                    // После продажи продолжаем текущий проход (снова откроем ах)
+                    setState(BotState.OPEN_AH);
                     setWait(20);
                     break;
             }
         });
     }
 
-    private void clickRefreshButton(Screen screen) {
-        for (var child : screen.children()) {
-            if (child instanceof ClickableWidget widget) {
-                String text = widget.getMessage().getString().toLowerCase();
-                if (text.contains("обновить") || text.contains("refresh")) {
-                    int mouseX = widget.getX() + widget.getWidth() / 2;
-                    int mouseY = widget.getY() + widget.getHeight() / 2;
-                    widget.mouseClicked(mouseX, mouseY, 0);
-                    return;
-                }
-            }
-        }
-    }
-
-    private void scanAuction(HandledScreen<?> screen) {
+    /**
+     * Сканирует текущую страницу, обновляет статистику и принимает решение о покупке.
+     * @return true, если найден лот для немедленной покупки
+     */
+    private boolean scanAndEvaluate(HandledScreen<?> screen) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return;
+        if (client.player == null) return false;
 
-        Map<String, List<Long>> itemPrices = new HashMap<>();
+        Map<String, List<Long>> pagePrices = new HashMap<>();
 
+        // Сбор данных со страницы
         for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
             Slot slot = screen.getScreenHandler().slots.get(i);
             if (!slot.hasStack()) continue;
@@ -226,19 +260,28 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             long price = extractPrice(stack);
             if (price <= 0) continue;
 
-            itemPrices.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
+            pagePrices.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
         }
 
-        for (Map.Entry<String, List<Long>> entry : itemPrices.entrySet()) {
+        // Обновление общей статистики
+        for (var entry : pagePrices.entrySet()) {
             String name = entry.getKey();
-            List<Long> prices = entry.getValue();
-            long avg = (long) prices.stream().mapToLong(Long::longValue).average().orElse(0);
+            List<Long> newPrices = entry.getValue();
+
+            priceSamples.computeIfAbsent(name, k -> new ArrayList<>()).addAll(newPrices);
+            itemCounts.put(name, priceSamples.get(name).size());
+
+            // Пересчёт средней рыночной
+            List<Long> allPrices = priceSamples.get(name);
+            long avg = (long) allPrices.stream().mapToLong(Long::longValue).average().orElse(0);
             marketPrices.put(name, avg);
         }
 
+        // Поиск цели для покупки
         Slot bestSlot = null;
         String bestName = "";
         long bestPrice = Long.MAX_VALUE;
+        double bestDiscount = 0;
 
         for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
             Slot slot = screen.getScreenHandler().slots.get(i);
@@ -248,13 +291,28 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             long price = extractPrice(stack);
             if (price <= 0) continue;
 
+            boolean isTotem = name.toLowerCase().contains("тотем") || name.toLowerCase().contains("totem");
+
+            // Спецправило для тотемов в диапазоне 50-100к
+            if (isTotem && price >= 50000 && price <= 100000) {
+                buySlotId = i;
+                buyItemName = name;
+                buyPrice = price;
+                sendMsg("Найден тотем по спеццене: " + price, Formatting.AQUA);
+                return true;
+            }
+
+            // Обычные правила покупки: достаточно лотов и цена ниже рынка на 25%
             long market = marketPrices.getOrDefault(name, price);
-            if (market <= 0) continue;
-            double discount = 1.0 - (double) price / market;
-            if (discount >= 0.25 && price < bestPrice) {
-                bestPrice = price;
-                bestSlot = slot;
-                bestName = name;
+            int count = itemCounts.getOrDefault(name, 0);
+            if (count >= MIN_LOTS_FOR_PURCHASE && market > 0) {
+                double discount = 1.0 - (double) price / market;
+                if (discount >= 0.25 && price < bestPrice) {
+                    bestPrice = price;
+                    bestSlot = slot;
+                    bestName = name;
+                    bestDiscount = discount;
+                }
             }
         }
 
@@ -262,23 +320,40 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buySlotId = bestSlot.id;
             buyItemName = bestName;
             buyPrice = bestPrice;
-            sendMsg("Найден " + bestName + " за " + bestPrice + " (рынок " + marketPrices.get(bestName) + ")", Formatting.AQUA);
-        } else {
-            buySlotId = -1;
+            sendMsg("Выгодное предложение: " + bestName + " за " + bestPrice +
+                    " (рынок " + marketPrices.get(bestName) + ", скидка " +
+                    String.format("%.0f%%", bestDiscount * 100) + ")", Formatting.AQUA);
+            return true;
         }
+
+        return false;
+    }
+
+    /**
+     * Ищет в слотах предмет, символизирующий кнопку "Следующая страница".
+     * @return id слота или -1
+     */
+    private int findNextPageSlot(HandledScreen<?> screen) {
+        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
+            Slot slot = screen.getScreenHandler().slots.get(i);
+            if (!slot.hasStack()) continue;
+            String name = slot.getStack().getName().getString().toLowerCase();
+            if (name.contains("next") || name.contains("далее") || name.contains("следующая")) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-        // Полная анонимная реализация TooltipContext со всеми методами, включая getRegistryLookup
         List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
             public boolean isAdvanced() { return false; }
             public boolean isCreative() { return false; }
             public MapState getMapState(MapIdComponent id) { return null; }
             public float getUpdateTickRate() { return 20.0F; }
             public RegistryWrapper.WrapperLookup getRegistryLookup() {
-                // Получаем актуальный RegistryLookup из мира игрока
                 return MinecraftClient.getInstance().player.getWorld().getRegistryManager();
             }
         }, client.player, TooltipType.Default.BASIC);
