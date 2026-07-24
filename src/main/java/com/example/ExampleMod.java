@@ -268,7 +268,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-        List<Text> lore = stack.getTooltip(Item.TooltipContext.EMPTY, client.player, TooltipType.Default.BASIC);
+        // Исправление: создаём экземпляр TooltipContext вручную (advanced=false, creative=false)
+        List<Text> lore = stack.getTooltip(new Item.TooltipContext(false, false), client.player, TooltipType.Default.BASIC);
         for (Text line : lore) {
             String text = line.getString().toLowerCase();
             if (text.contains("цена:") || text.contains("price:")) {
@@ -301,4 +302,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-                }
+                    }
