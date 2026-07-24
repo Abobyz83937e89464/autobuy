@@ -1,6 +1,7 @@
 package com.example;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
@@ -24,11 +25,12 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
-public class ExampleMod implements ClientModInitializer {
+public class ExampleMod implements ModInitializer, ClientModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static KeyBinding toggleKey;
+    private static boolean initialized = false;
 
     private boolean isActive = false;
     private long currentBalance = 0;
@@ -46,7 +48,19 @@ public class ExampleMod implements ClientModInitializer {
     private long buyPrice = 0;
 
     @Override
+    public void onInitialize() {
+        initLogic();
+    }
+
+    @Override
     public void onInitializeClient() {
+        initLogic();
+    }
+
+    private synchronized void initLogic() {
+        if (initialized) return;
+        initialized = true;
+
         LOGGER.info("[AutoBuy] Мод успешно инициализирован!");
 
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
@@ -210,6 +224,7 @@ public class ExampleMod implements ClientModInitializer {
             String name = stack.getName().getString();
             long price = extractPrice(stack);
             if (price <= 0) continue;
+
             itemPrices.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
         }
 
@@ -255,17 +270,13 @@ public class ExampleMod implements ClientModInitializer {
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-
-        // Фикс для 1.21.4 — добавлен getUpdateTickRate()
+        // Полная анонимная реализация TooltipContext со всеми методами, включая getUpdateTickRate
         List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
-            @Override
             public boolean isAdvanced() { return false; }
-            @Override
-            public float getUpdateTickRate() { return 20.0f; }
-            @Override
+            public boolean isCreative() { return false; }
             public MapState getMapState(MapIdComponent id) { return null; }
+            public float getUpdateTickRate() { return 20.0F; } // стандартная частота обновления
         }, client.player, TooltipType.Default.BASIC);
-
         for (Text line : lore) {
             String text = line.getString().toLowerCase();
             if (text.contains("цена:") || text.contains("price:")) {
@@ -298,4 +309,4 @@ public class ExampleMod implements ClientModInitializer {
             ));
         }
     }
-                }
+}
