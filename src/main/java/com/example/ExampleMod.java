@@ -68,10 +68,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private static final int MAX_MARKET_ATTEMPTS = 2;
     private int marketGuiWaitTicks = 0;
 
-    // Подтверждение покупки
-    private int confirmClickCount = 0;
-    private static final int MAX_CONFIRM_CLICKS = 4;
-
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
     private static final Set<String> BLACKLIST_KEYWORDS = Set.of(
@@ -339,9 +335,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             );
                             sendMsg("Первый клик по лоту: " + buyItemName, Formatting.GREEN);
                         }
-                        confirmClickCount = 0;
                         setState(BotState.CONFIRM_BUY);
-                        setWait(4);
+                        setWait(8); // ждём появления кнопки "Купить"
                     } else {
                         advanceTarget();
                     }
@@ -349,40 +344,27 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
                 case CONFIRM_BUY:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        int slotToClick = confirmClickCount; // 0, 1, 2, 3
-                        if (slotToClick < screen.getScreenHandler().slots.size()) {
+                        int confirmSlot = findBuySlot(screen);
+                        if (confirmSlot != -1) {
                             client.interactionManager.clickSlot(
                                     screen.getScreenHandler().syncId,
-                                    slotToClick,
+                                    confirmSlot,
                                     0,
                                     net.minecraft.screen.slot.SlotActionType.PICKUP,
                                     client.player
                             );
-                            sendMsg("Подтверждение: клик по слоту " + slotToClick, Formatting.AQUA);
-                        }
-                        confirmClickCount++;
-                        if (confirmClickCount >= MAX_CONFIRM_CLICKS) {
-                            // Все клики сделаны, закрываем GUI и переходим к продаже
-                            client.setScreen(null);
-                            if (currentTarget != null && currentTarget.isMarketItem) {
-                                setState(BotState.SELL_TO_MARKET);
-                            } else {
-                                setState(BotState.SELL_TO_AH);
-                            }
-                            setWait(10);
+                            sendMsg("Подтверждение покупки (слот " + confirmSlot + ")", Formatting.AQUA);
                         } else {
-                            // Ждём перед следующим кликом
-                            setWait(4);
+                            sendMsg("Слот 'Купить' не найден, продолжаем без подтверждения.", Formatting.RED);
                         }
-                    } else {
-                        // GUI почему-то закрылся, всё равно продаём
-                        if (currentTarget != null && currentTarget.isMarketItem) {
-                            setState(BotState.SELL_TO_MARKET);
-                        } else {
-                            setState(BotState.SELL_TO_AH);
-                        }
-                        setWait(10);
+                        client.setScreen(null);
                     }
+                    if (currentTarget != null && currentTarget.isMarketItem) {
+                        setState(BotState.SELL_TO_MARKET);
+                    } else {
+                        setState(BotState.SELL_TO_AH);
+                    }
+                    setWait(10);
                     break;
 
                 case SELL_TO_MARKET:
@@ -608,6 +590,21 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return -1;
     }
 
+    /**
+     * Ищет слот с предметом-кнопкой "Купить" (зелёное стекло).
+     */
+    private int findBuySlot(HandledScreen<?> screen) {
+        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
+            Slot slot = screen.getScreenHandler().slots.get(i);
+            if (!slot.hasStack()) continue;
+            String name = slot.getStack().getName().getString().toLowerCase();
+            if (name.contains("купить") || name.contains("buy")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
@@ -652,4 +649,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-                }
+                                }
