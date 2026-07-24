@@ -38,30 +38,47 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int waitTicks = 0;
 
     enum BotState {
-        IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, EVALUATE, FIND_AND_BUY, BUY_ITEM, SELL_ITEM
+        IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, EVALUATE,
+        PROCESS_TARGET, CHECK_MARKET, FIND_AND_BUY, BUY_ITEM, SELL_TO_MARKET, SELL_TO_AH
     }
 
+    // Статистика текущего прохода
     private final Map<String, List<Long>> priceSamples = new HashMap<>();
-    private final Map<String, Long> marketPrices = new HashMap<>();
+    private final Map<String, Long> marketPrices = new HashMap<>(); // средняя цена на ауке
     private final Map<String, Integer> itemCounts = new HashMap<>();
 
-    private String targetItemName = "";
-    private long targetMaxPrice = 0;
+    // Цели для покупки
+    private static class Target {
+        String name;
+        long maxPrice;         // цена на аукционе, по которой хотим купить
+        long marketUnitPrice;  // цена за штуку с маркета (только для руд)
+        boolean isOre;
+    }
+    private final List<Target> targets = new ArrayList<>();
+    private int currentTargetIndex = 0;
+    private Target currentTarget = null;
 
+    // Для покупки
     private int buySlotId = -1;
     private String buyItemName = "";
     private long buyPrice = 0;
 
     private int nextPageSlotId = -1;
-    private boolean huntingMode = false;
+    private boolean huntingMode = false; // true, когда ищем конкретный предмет на страницах
 
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
-    // Чёрный список: предметы, которые никогда не покупаем
+    // Чёрный список низкоуровневых вещей
     private static final Set<String> BLACKLIST_KEYWORDS = Set.of(
         "кожан", "железн", "золот", "каменн", "деревянн", "цепн", "кольчуг",
-        "удочк", "fishing rod", "bow" // лук тоже запрещён, если есть в названии
-        // при желании можно добавить "каменный", "железный" и т.д., но достаточно основ
+        "удочк", "fishing rod", "bow"
+    );
+
+    // Ключевые слова для руды (проверяем через /market)
+    private static final Set<String> ORE_KEYWORDS = Set.of(
+        "лазурит", "lapis", "алмаз", "diamond", "изумруд", "emerald",
+        "золото", "gold", "железо", "iron", "медь", "copper",
+        "редстоун", "redstone", "уголь", "coal", "кварц", "quartz"
     );
 
     @Override
@@ -87,29 +104,20 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
+        // Обработчик чата: баланс и результаты /market search
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
-            if (!isActive || currentState != BotState.CHECK_BALANCE) return;
+            if (!isActive) return;
             String text = message.getString();
-            if (text.toLowerCase().contains("balance") || text.toLowerCase().contains("баланс")) {
-                MinecraftClient.getInstance().execute(() -> {
-                    try {
-                        String nums = text.replaceAll("[^0-9]", "");
-                        if (!nums.isEmpty()) {
-                            currentBalance = Long.parseLong(nums);
-                            sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
-                            if (currentBalance <= 0) {
-                                sendMsg("Недостаточно средств. Бот остановлен.", Formatting.RED);
-                                isActive = false;
-                                setState(BotState.IDLE);
-                            } else {
-                                setState(BotState.OPEN_AH);
-                                setWait(20);
-                            }
-                        }
-                    } catch (Exception e) {
-                        sendMsg("Ошибка парсинга баланса.", Formatting.RED);
-                    }
-                });
+
+            if (currentState == BotState.CHECK_BALANCE &&
+                (text.toLowerCase().contains("balance") || text.toLowerCase().contains("баланс"))) {
+                MinecraftClient.getInstance().execute(() -> parseBalance(text));
+            }
+            else if (currentState == BotState.CHECK_MARKET) {
+                // Ждём ответ от /market search
+                if (text.toLowerCase().contains("цена:") || text.toLowerCase().contains("price:")) {
+                    MinecraftClient.getInstance().execute(() -> parseMarketPrice(text));
+                }
             }
         });
 
@@ -142,26 +150,27 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
                 case CHECK_BALANCE:
                     client.getNetworkHandler().sendCommand("balance");
-                    setWait(100);
+                    setWait(60);
                     break;
 
                 case OPEN_AH:
                     priceSamples.clear();
                     marketPrices.clear();
                     itemCounts.clear();
-                    targetItemName = "";
-                    targetMaxPrice = 0;
+                    targets.clear();
+                    currentTargetIndex = 0;
+                    currentTarget = null;
                     huntingMode = false;
 
                     client.getNetworkHandler().sendCommand("ah");
                     setState(BotState.SCAN_PAGE);
-                    setWait(30);
+                    setWait(15); // Быстрая подгрузка GUI
                     break;
 
                 case SCAN_PAGE:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
                         if (huntingMode) {
-                            boolean found = searchForTarget(screen);
+                            boolean found = searchForCurrentTarget(screen);
                             if (found) {
                                 setState(BotState.BUY_ITEM);
                             } else {
@@ -169,10 +178,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                                 if (nextPageSlotId != -1) {
                                     setState(BotState.NEXT_PAGE);
                                 } else {
-                                    sendMsg("Цель потеряна, начинаю новый проход.", Formatting.RED);
-                                    client.setScreen(null);
-                                    setState(BotState.OPEN_AH);
-                                    setWait(30);
+                                    // Цель не найдена, пробуем следующую
+                                    advanceTarget();
                                 }
                             }
                         } else {
@@ -187,7 +194,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     } else {
                         sendMsg("Аукцион не открыт, пробую снова /ah", Formatting.RED);
                         setState(BotState.OPEN_AH);
-                        setWait(40);
+                        setWait(15);
                     }
                     break;
 
@@ -201,8 +208,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                                 net.minecraft.screen.slot.SlotActionType.PICKUP,
                                 client.player
                             );
+                            // Мгновенный переход к сканированию
                             setState(BotState.SCAN_PAGE);
-                            setWait(20);
+                            setWait(4); // минимальная задержка для обновления GUI
                         } else {
                             client.setScreen(null);
                             setState(BotState.OPEN_AH);
@@ -213,25 +221,82 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;
 
                 case EVALUATE:
-                    chooseTarget();
-                    if (!targetItemName.isEmpty()) {
-                        sendMsg("Цель: " + targetItemName + " макс.цена: " + targetMaxPrice, Formatting.AQUA);
-                        huntingMode = true;
+                    evaluateTargets();
+                    if (!targets.isEmpty()) {
+                        sendMsg("Найдено выгодных лотов: " + targets.size(), Formatting.AQUA);
+                        for (Target t : targets) {
+                            sendMsg(" - " + t.name + " цена " + t.maxPrice, Formatting.GRAY);
+                        }
+                        currentTargetIndex = 0;
+                        // Закрываем аук и начинаем обработку целей
                         client.setScreen(null);
-                        setState(BotState.FIND_AND_BUY);
-                        setWait(20);
+                        setState(BotState.PROCESS_TARGET);
+                        setWait(10);
                     } else {
-                        sendMsg("Нет выгодных предложений, начинаю новый проход.", Formatting.GRAY);
+                        sendMsg("Нет целей, начинаю новый проход.", Formatting.GRAY);
                         client.setScreen(null);
                         setState(BotState.OPEN_AH);
-                        setWait(30);
+                        setWait(20);
                     }
                     break;
 
+                case PROCESS_TARGET:
+                    if (currentTargetIndex >= targets.size()) {
+                        // Все цели обработаны, новый цикл
+                        sendMsg("Все цели обработаны, открываю аукцион заново.", Formatting.GRAY);
+                        setState(BotState.OPEN_AH);
+                        setWait(10);
+                    } else {
+                        currentTarget = targets.get(currentTargetIndex);
+                        if (currentTarget.isOre) {
+                            // Проверяем цену на маркете
+                            client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
+                            setState(BotState.CHECK_MARKET);
+                            setWait(80); // Ждём ответ от маркета
+                        } else {
+                            // Обычный предмет – сразу ищем на аукционе
+                            huntingMode = true;
+                            client.getNetworkHandler().sendCommand("ah");
+                            setState(BotState.FIND_AND_BUY);
+                            setWait(15);
+                        }
+                    }
+                    break;
+
+                case CHECK_MARKET:
+                    // Ответ должен прийти в обработчик чата и вызвать continueWithMarket()
+                    // Если по таймауту ничего нет, сбрасываем
+                    sendMsg("Нет ответа от /market, пропускаю " + currentTarget.name, Formatting.RED);
+                    advanceTarget();
+                    break;
+
                 case FIND_AND_BUY:
-                    client.getNetworkHandler().sendCommand("ah");
-                    setState(BotState.SCAN_PAGE); // huntingMode уже true
-                    setWait(30);
+                    // Открыли аукцион для поиска цели
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        boolean found = searchForCurrentTarget(screen);
+                        if (found) {
+                            setState(BotState.BUY_ITEM);
+                        } else {
+                            nextPageSlotId = findNextPageSlot(screen);
+                            if (nextPageSlotId != -1) {
+                                client.interactionManager.clickSlot(
+                                    screen.getScreenHandler().syncId,
+                                    nextPageSlotId,
+                                    0,
+                                    net.minecraft.screen.slot.SlotActionType.PICKUP,
+                                    client.player
+                                );
+                                setWait(4);
+                            } else {
+                                sendMsg("Цель не найдена на ауке: " + currentTarget.name, Formatting.RED);
+                                advanceTarget();
+                            }
+                        }
+                    } else {
+                        sendMsg("Аукцион не открыт для цели, пробую /ah", Formatting.RED);
+                        client.getNetworkHandler().sendCommand("ah");
+                        setWait(15);
+                    }
                     break;
 
                 case BUY_ITEM:
@@ -246,33 +311,101 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             );
                             sendMsg("Куплен " + buyItemName + " за " + buyPrice, Formatting.GREEN);
                         }
-                        setState(BotState.SELL_ITEM);
-                        setWait(20);
+                        // После покупки решаем, куда продавать
+                        if (currentTarget != null && currentTarget.isOre) {
+                            setState(BotState.SELL_TO_MARKET);
+                        } else {
+                            setState(BotState.SELL_TO_AH);
+                        }
+                        setWait(10);
                     } else {
-                        setState(BotState.OPEN_AH);
+                        advanceTarget();
                     }
                     break;
 
-                case SELL_ITEM:
-                    long marketPrice = marketPrices.getOrDefault(buyItemName, 0L);
-                    if (marketPrice <= 0) marketPrice = buyPrice;
-                    long sellPrice = (long)(marketPrice * 1.25);
+                case SELL_TO_MARKET:
+                    // Продаём руду на маркете по цене за штуку
+                    if (currentTarget != null && currentTarget.marketUnitPrice > 0) {
+                        client.getNetworkHandler().sendCommand("market sell " + currentTarget.marketUnitPrice);
+                        sendMsg("Продаю на маркете " + currentTarget.name + " по " + currentTarget.marketUnitPrice, Formatting.GREEN);
+                    }
+                    advanceTarget();
+                    break;
+
+                case SELL_TO_AH:
+                    long avgPrice = marketPrices.getOrDefault(buyItemName, buyPrice);
+                    if (avgPrice <= 0) avgPrice = buyPrice;
+                    long sellPrice = (long)(avgPrice * 1.25);
                     if (sellPrice <= 0) sellPrice = 50000;
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
                     sendMsg("Выставляю " + buyItemName + " за " + sellPrice, Formatting.GREEN);
-                    buySlotId = -1;
-                    buyItemName = "";
-                    buyPrice = 0;
-                    targetItemName = "";
-                    targetMaxPrice = 0;
-                    huntingMode = false;
-                    setState(BotState.OPEN_AH);
-                    setWait(20);
+                    advanceTarget();
                     break;
             }
         });
     }
 
+    // ===================== Обработчики чата =====================
+    private void parseBalance(String text) {
+        try {
+            String nums = text.replaceAll("[^0-9]", "");
+            if (!nums.isEmpty()) {
+                currentBalance = Long.parseLong(nums);
+                sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
+                if (currentBalance <= 0) {
+                    sendMsg("Недостаточно средств. Бот остановлен.", Formatting.RED);
+                    isActive = false;
+                    setState(BotState.IDLE);
+                } else {
+                    setState(BotState.OPEN_AH);
+                    setWait(10);
+                }
+            }
+        } catch (Exception e) {
+            sendMsg("Ошибка парсинга баланса.", Formatting.RED);
+        }
+    }
+
+    private void parseMarketPrice(String text) {
+        if (currentTarget == null || currentState != BotState.CHECK_MARKET) return;
+        try {
+            String nums = text.replaceAll("[^0-9]", "");
+            if (!nums.isEmpty()) {
+                long marketPrice = Long.parseLong(nums);
+                if (marketPrice > currentTarget.maxPrice) {
+                    // Цена на маркете выше аукционной – цель выгодна
+                    currentTarget.marketUnitPrice = marketPrice;
+                    sendMsg("Маркет цена: " + marketPrice + " (выше аукциона), покупаем.", Formatting.AQUA);
+                    // Переходим к поиску на аукционе
+                    huntingMode = true;
+                    MinecraftClient.getInstance().getNetworkHandler().sendCommand("ah");
+                    setState(BotState.FIND_AND_BUY);
+                    setWait(15);
+                } else {
+                    sendMsg("Маркет цена " + marketPrice + " не выше аукционной, пропускаем.", Formatting.RED);
+                    advanceTarget();
+                }
+            }
+        } catch (Exception e) {
+            advanceTarget();
+        }
+    }
+
+    // ===================== Управление целями =====================
+    private void advanceTarget() {
+        currentTargetIndex++;
+        buySlotId = -1;
+        buyItemName = "";
+        buyPrice = 0;
+        currentTarget = null;
+        huntingMode = false;
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.currentScreen != null) client.setScreen(null);
+        setState(BotState.PROCESS_TARGET);
+        setWait(5);
+    }
+
+    // ===================== Сканирование и оценка =====================
     private void scanPageForStats(HandledScreen<?> screen) {
         for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
             Slot slot = screen.getScreenHandler().slots.get(i);
@@ -280,15 +413,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ItemStack stack = slot.getStack();
             String name = stack.getName().getString();
             long price = extractPrice(stack);
-            if (price <= 0) continue;
-
-            // Фильтр: не добавляем в статистику запрещённые предметы
-            if (!isAllowedToBuy(name)) continue;
+            if (price <= 0 || !isAllowedToBuy(name)) continue;
 
             priceSamples.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
         }
 
-        // Пересчёт рынка
+        // Пересчёт средних рыночных цен на ауке
         marketPrices.clear();
         itemCounts.clear();
         for (var entry : priceSamples.entrySet()) {
@@ -300,17 +430,66 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
-    private boolean searchForTarget(HandledScreen<?> screen) {
+    private void evaluateTargets() {
+        targets.clear();
+
+        for (var entry : marketPrices.entrySet()) {
+            String name = entry.getKey();
+            long marketAvg = entry.getValue();
+            int count = itemCounts.getOrDefault(name, 0);
+
+            if (!isAllowedToBuy(name)) continue;
+
+            boolean isOre = isOreItem(name);
+            boolean isTotem = name.toLowerCase().contains("тотем") || name.toLowerCase().contains("totem");
+
+            List<Long> prices = priceSamples.get(name);
+            if (prices == null) continue;
+
+            for (long auctionPrice : prices) {
+                if (isTotem) {
+                    if (auctionPrice >= 50000 && auctionPrice <= 100000) {
+                        Target t = new Target();
+                        t.name = name;
+                        t.maxPrice = auctionPrice;
+                        t.isOre = false; // тотем продаём на ауке
+                        targets.add(t);
+                        break; // достаточно одного тотема в список
+                    }
+                } else if (count >= MIN_LOTS_FOR_PURCHASE) {
+                    double discount = 1.0 - (double) auctionPrice / marketAvg;
+                    if (discount >= 0.25) {
+                        Target t = new Target();
+                        t.name = name;
+                        t.maxPrice = auctionPrice;
+                        t.isOre = isOre;
+                        targets.add(t);
+                        break; // добавляем предмет один раз в список
+                    }
+                }
+            }
+        }
+
+        // Сортировка: сначала руды, потом остальные, по наибольшей скидке
+        targets.sort((a, b) -> {
+            if (a.isOre != b.isOre) return a.isOre ? -1 : 1;
+            double discA = 1.0 - (double)a.maxPrice / marketPrices.getOrDefault(a.name, a.maxPrice);
+            double discB = 1.0 - (double)b.maxPrice / marketPrices.getOrDefault(b.name, b.maxPrice);
+            return Double.compare(discB, discA);
+        });
+    }
+
+    private boolean searchForCurrentTarget(HandledScreen<?> screen) {
+        if (currentTarget == null) return false;
         for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
             Slot slot = screen.getScreenHandler().slots.get(i);
             if (!slot.hasStack()) continue;
             ItemStack stack = slot.getStack();
-            String name = stack.getName().getString();
-            if (name.equals(targetItemName)) {
+            if (stack.getName().getString().equals(currentTarget.name)) {
                 long price = extractPrice(stack);
-                if (price > 0 && price <= targetMaxPrice) {
+                if (price > 0 && price <= currentTarget.maxPrice) {
                     buySlotId = i;
-                    buyItemName = name;
+                    buyItemName = currentTarget.name;
                     buyPrice = price;
                     return true;
                 }
@@ -319,62 +498,21 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return false;
     }
 
-    private void chooseTarget() {
-        String bestName = "";
-        long bestPrice = Long.MAX_VALUE;
-
-        for (var entry : marketPrices.entrySet()) {
-            String name = entry.getKey();
-            long market = entry.getValue();
-            int count = itemCounts.getOrDefault(name, 0);
-
-            // Дополнительная проверка на всякий случай (уже отфильтровано при сборе)
-            if (!isAllowedToBuy(name)) continue;
-
-            boolean isTotem = name.toLowerCase().contains("тотем") || name.toLowerCase().contains("totem");
-
-            if (isTotem) {
-                List<Long> prices = priceSamples.get(name);
-                if (prices != null) {
-                    for (long p : prices) {
-                        if (p >= 50000 && p <= 100000 && p < bestPrice) {
-                            bestPrice = p;
-                            bestName = name;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if (count < MIN_LOTS_FOR_PURCHASE) continue;
-
-            List<Long> prices = priceSamples.get(name);
-            if (prices != null) {
-                for (long p : prices) {
-                    double discount = 1.0 - (double) p / market;
-                    if (discount >= 0.25 && p < bestPrice) {
-                        bestPrice = p;
-                        bestName = name;
-                    }
-                }
-            }
-        }
-
-        if (!bestName.isEmpty()) {
-            targetItemName = bestName;
-            targetMaxPrice = bestPrice;
-        }
-    }
-
+    // ===================== Вспомогательные методы =====================
     private boolean isAllowedToBuy(String name) {
         String lower = name.toLowerCase();
-        // Проверка чёрного списка
-        for (String keyword : BLACKLIST_KEYWORDS) {
-            if (lower.contains(keyword)) {
-                return false;
-            }
+        for (String kw : BLACKLIST_KEYWORDS) {
+            if (lower.contains(kw)) return false;
         }
         return true;
+    }
+
+    private boolean isOreItem(String name) {
+        String lower = name.toLowerCase();
+        for (String kw : ORE_KEYWORDS) {
+            if (lower.contains(kw)) return true;
+        }
+        return false;
     }
 
     private int findNextPageSlot(HandledScreen<?> screen) {
@@ -420,7 +558,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private void setWait(int ticks) {
-        this.waitTicks = ticks + (int)(Math.random() * 5);
+        this.waitTicks = Math.max(1, ticks + (int)(Math.random() * 3));
     }
 
     private void sendMsg(String msg, Formatting color) {
@@ -433,4 +571,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-}
+            }
