@@ -108,7 +108,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
-        // Только для баланса – остальное теперь через GUI
+        // Обработчик чата (только баланс)
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive) return;
             String text = message.getString();
@@ -118,6 +118,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
+        // Основной такт
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -245,7 +246,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             marketAttempts = 0;
                             client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
                             setState(BotState.MARKET_GUI);
-                            marketGuiWaitTicks = 200; // ждём открытия GUI до 10 секунд
+                            marketGuiWaitTicks = 10; // ускорено до 0.5 сек (10 тиков)
                             setWait(marketGuiWaitTicks);
                         } else {
                             huntingMode = true;
@@ -258,14 +259,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
                 case MARKET_GUI:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        // GUI открылся, сканируем
                         long unitPrice = scanMarketGui(screen);
                         if (unitPrice > 0) {
                             currentTarget.marketUnitPrice = unitPrice;
                             sendMsg("Маркет цена за шт: " + unitPrice, Formatting.AQUA);
                             if (unitPrice > currentTarget.maxPrice) {
                                 sendMsg("Маркет дороже аукциона, покупаем!", Formatting.GREEN);
-                                client.setScreen(null); // закрываем GUI маркета
+                                client.setScreen(null);
                                 huntingMode = true;
                                 client.getNetworkHandler().sendCommand("ah");
                                 setState(BotState.FIND_AND_BUY);
@@ -281,22 +281,20 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             advanceTarget();
                         }
                     } else {
-                        // GUI не открылся, проверяем таймаут
                         if (marketGuiWaitTicks <= 0) {
                             if (marketAttempts < MAX_MARKET_ATTEMPTS - 1) {
                                 marketAttempts++;
                                 sendMsg("Повторная попытка /market search для " + currentTarget.name, Formatting.YELLOW);
                                 client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
-                                marketGuiWaitTicks = 200;
+                                marketGuiWaitTicks = 10;
                                 setWait(marketGuiWaitTicks);
                             } else {
                                 sendMsg("Не удалось открыть GUI маркета, пропускаю.", Formatting.RED);
                                 advanceTarget();
                             }
                         } else {
-                            // ещё ждём
-                            marketGuiWaitTicks -= waitTicks; // waitTicks уже был установлен
-                            setWait(1); // проверяем каждый тик
+                            marketGuiWaitTicks -= waitTicks;
+                            setWait(1);
                         }
                     }
                     break;
@@ -361,10 +359,18 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;
 
                 case SELL_TO_AH:
-                    long avgPrice = marketPrices.getOrDefault(buyItemName, buyPrice);
-                    if (avgPrice <= 0) avgPrice = buyPrice;
-                    long sellPrice = (long)(avgPrice * 1.25);
-                    if (sellPrice <= 0) sellPrice = 50000;
+                    // Новая прогрессивная наценка от цены покупки
+                    long sellPrice;
+                    if (buyPrice < 10_000) {
+                        sellPrice = (long)(buyPrice * 1.7);
+                    } else if (buyPrice < 50_000) {
+                        sellPrice = (long)(buyPrice * 1.33);
+                    } else if (buyPrice < 150_000) {
+                        sellPrice = (long)(buyPrice * 1.2);
+                    } else {
+                        sellPrice = (long)(buyPrice * 1.15);
+                    }
+                    if (sellPrice <= 0) sellPrice = 50000; // страховка
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
                     sendMsg("Выставляю " + buyItemName + " за " + sellPrice, Formatting.GREEN);
                     advanceTarget();
@@ -432,10 +438,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
-    /**
-     * Сканирует GUI маркета (/market search) и извлекает цену за штуку из лора предмета.
-     * Ищет строки: "минимальная цена", "цена за шт.", "unit price".
-     */
     private long scanMarketGui(HandledScreen<?> screen) {
         for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
             Slot slot = screen.getScreenHandler().slots.get(i);
@@ -616,4 +618,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-                }
+        }
