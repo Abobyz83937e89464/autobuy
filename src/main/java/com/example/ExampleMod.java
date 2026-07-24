@@ -16,6 +16,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.map.MapState;
 import net.minecraft.item.tooltip.TooltipType;
+import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -270,12 +271,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private long extractPrice(ItemStack stack) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return -1;
-        // Полная анонимная реализация TooltipContext со всеми методами, включая getUpdateTickRate
+        // Полная анонимная реализация TooltipContext со всеми методами, включая getRegistryLookup
         List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
             public boolean isAdvanced() { return false; }
             public boolean isCreative() { return false; }
             public MapState getMapState(MapIdComponent id) { return null; }
-            public float getUpdateTickRate() { return 20.0F; } // стандартная частота обновления
+            public float getUpdateTickRate() { return 20.0F; }
+            public RegistryWrapper.WrapperLookup getRegistryLookup() {
+                // Получаем актуальный RegistryLookup из мира игрока
+                return MinecraftClient.getInstance().player.getWorld().getRegistryManager();
+            }
         }, client.player, TooltipType.Default.BASIC);
         for (Text line : lore) {
             String text = line.getString().toLowerCase();
