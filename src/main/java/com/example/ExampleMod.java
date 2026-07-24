@@ -1,9 +1,10 @@
 package com.example;
 
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
-import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.screen.slot.Slot;
@@ -11,6 +12,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.mojang.brigadier.arguments.LongArgumentType;
 
 public class ExampleMod implements ModInitializer {
     public static final String MOD_ID = "autobuy";
@@ -35,51 +37,46 @@ public class ExampleMod implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("AutoBuy mod initialized.");
 
-        // 1. ЖЕЛЕЗОБЕТОННЫЙ ПЕРЕХВАТ ЧАТА
-        ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
-            try {
-                String text = message.trim().toLowerCase();
-                
-                // Обработка .startbot
-                if (text.equals(".startbot")) {
-                    // Перекидываем выполнение в главный поток, чтобы игра не блокировала вывод
-                    MinecraftClient.getInstance().execute(() -> {
-                        isActive = !isActive;
-                        sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"), isActive ? Formatting.GREEN : Formatting.RED);
-                        if (isActive) {
-                            setState(BotState.CHECK_BALANCE);
-                        } else {
-                            setState(BotState.IDLE);
-                        }
-                    });
-                    return false; // Отсекаем отправку на сервер
-                }
-
-                // Обработка .botmax
-                if (text.startsWith(".botmax")) {
-                    MinecraftClient.getInstance().execute(() -> {
-                        try {
-                            String[] parts = text.split(" ");
-                            if (parts.length > 1) {
-                                maxBudget = Long.parseLong(parts[1]);
-                                sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
+        // Регистрация клиентских команд (.startbot и .botmax)
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(
+                ClientCommandManager.literal("startbot")
+                    .executes(ctx -> {
+                        MinecraftClient client = ctx.getSource().getClient();
+                        client.execute(() -> {
+                            isActive = !isActive;
+                            sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"),
+                                    isActive ? Formatting.GREEN : Formatting.RED);
+                            if (isActive) {
+                                setState(BotState.CHECK_BALANCE);
                             } else {
-                                sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED);
+                                setState(BotState.IDLE);
                             }
-                        } catch (NumberFormatException e) {
-                            sendMsg("Ошибка: введите число. Пример: .botmax 250000", Formatting.RED);
-                        }
-                    });
-                    return false; // Отсекаем отправку на сервер
-                }
-            } catch (Exception e) {
-                LOGGER.error("Ошибка при перехвате чата", e);
-            }
-            
-            return true; // Обычные сообщения летят как обычно
+                        });
+                        return 1;
+                    })
+            );
+            dispatcher.register(
+                ClientCommandManager.literal("botmax")
+                    .then(ClientCommandManager.argument("amount", LongArgumentType.longArg())
+                        .executes(ctx -> {
+                            long amount = LongArgumentType.getLong(ctx, "amount");
+                            MinecraftClient client = ctx.getSource().getClient();
+                            client.execute(() -> {
+                                maxBudget = amount;
+                                sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
+                            });
+                            return 1;
+                        }))
+                    .executes(ctx -> {
+                        MinecraftClient client = ctx.getSource().getClient();
+                        client.execute(() -> sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED));
+                        return 1;
+                    })
+            );
         });
 
-        // 2. ЧТЕНИЕ БАЛАНСА ИЗ СЕРВЕРНОГО ЧАТА
+        // Чтение баланса из серверного чата (без изменений)
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
@@ -95,7 +92,7 @@ public class ExampleMod implements ModInitializer {
                             if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
                                 sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
                                 setState(BotState.REST);
-                                setWait(6000); // Отдых 5 минут
+                                setWait(6000);
                             } else {
                                 setState(BotState.OPEN_AH);
                                 setWait(40);
@@ -108,7 +105,7 @@ public class ExampleMod implements ModInitializer {
             }
         });
 
-        // 3. ОСНОВНОЙ ЦИКЛ БОТА
+        // Основной цикл бота (без изменений)
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (!isActive || client.player == null) return;
 
@@ -135,12 +132,11 @@ public class ExampleMod implements ModInitializer {
                 case SCAN_AH:
                     if (client.currentScreen instanceof HandledScreen<?>) {
                         sendMsg("Анализ рынка...", Formatting.AQUA);
-                        // Хардкод для теста (11 слот), позже сюда вставим парсер Lore
                         targetSlotId = 11; 
                         medianPrice = 10000; 
                         observeAttempts = 0;
                         setState(BotState.OBSERVE);
-                        setWait(200); // Ждем 10 сек
+                        setWait(200);
                     } else {
                         sendMsg("GUI аукциона не открылось. Пробую снова.", Formatting.RED);
                         setState(BotState.OPEN_AH);
@@ -179,23 +175,23 @@ public class ExampleMod implements ModInitializer {
                         client.interactionManager.clickSlot(
                             screen.getScreenHandler().syncId,
                             targetSlotId,
-                            0, // ЛКМ
+                            0,
                             net.minecraft.screen.slot.SlotActionType.PICKUP,
                             client.player
                         );
                     }
                     setState(BotState.SELL_ITEM);
                     setWait(40);
-                    client.setScreen(null); // Закрываем GUI чтобы освободить руки
+                    client.setScreen(null);
                     break;
 
                 case SELL_ITEM:
                     long sellPrice = (long) (medianPrice * 1.05);
-                    if (sellPrice <= 0) sellPrice = 50000; // На всякий случай
+                    if (sellPrice <= 0) sellPrice = 50000;
                     sendMsg("Выставляю купленный товар за: " + sellPrice, Formatting.GREEN);
                     client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
                     setState(BotState.CHECK_BALANCE);
-                    setWait(60); // Ждем 3 сек перед новым кругом
+                    setWait(60);
                     break;
 
                 case REST:
@@ -210,11 +206,9 @@ public class ExampleMod implements ModInitializer {
     }
 
     private void setWait(int ticks) {
-        // Микро-рандомизация таймингов против анти-чита
         this.waitTicks = ticks + (int)(Math.random() * 10);
     }
 
-    // Безопасный вывод сообщений на клиентский экран
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -227,4 +221,4 @@ public class ExampleMod implements ModInitializer {
             });
         }
     }
-}
+            }
