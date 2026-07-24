@@ -68,6 +68,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private static final int MAX_MARKET_ATTEMPTS = 2;
     private int marketGuiWaitTicks = 0;
 
+    // Подтверждение покупки
+    private int confirmClickCount = 0;
+    private static final int MAX_CONFIRM_CLICKS = 4;
+
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
     private static final Set<String> BLACKLIST_KEYWORDS = Set.of(
@@ -335,9 +339,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             );
                             sendMsg("Первый клик по лоту: " + buyItemName, Formatting.GREEN);
                         }
-                        // Переходим к подтверждению – клик по первому слоту
+                        confirmClickCount = 0;
                         setState(BotState.CONFIRM_BUY);
-                        setWait(8); // даём GUI обновиться
+                        setWait(4);
                     } else {
                         advanceTarget();
                     }
@@ -345,26 +349,40 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
                 case CONFIRM_BUY:
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        int confirmSlot = 0; // первый слот, куда перемещается предмет для подтверждения
-                        if (confirmSlot < screen.getScreenHandler().slots.size()) {
+                        int slotToClick = confirmClickCount; // 0, 1, 2, 3
+                        if (slotToClick < screen.getScreenHandler().slots.size()) {
                             client.interactionManager.clickSlot(
                                     screen.getScreenHandler().syncId,
-                                    confirmSlot,
+                                    slotToClick,
                                     0,
                                     net.minecraft.screen.slot.SlotActionType.PICKUP,
                                     client.player
                             );
-                            sendMsg("Подтверждение покупки (слот 0)", Formatting.AQUA);
+                            sendMsg("Подтверждение: клик по слоту " + slotToClick, Formatting.AQUA);
                         }
-                        // После подтверждения закрываем GUI и идём продавать
-                        client.setScreen(null);
-                    }
-                    if (currentTarget != null && currentTarget.isMarketItem) {
-                        setState(BotState.SELL_TO_MARKET);
+                        confirmClickCount++;
+                        if (confirmClickCount >= MAX_CONFIRM_CLICKS) {
+                            // Все клики сделаны, закрываем GUI и переходим к продаже
+                            client.setScreen(null);
+                            if (currentTarget != null && currentTarget.isMarketItem) {
+                                setState(BotState.SELL_TO_MARKET);
+                            } else {
+                                setState(BotState.SELL_TO_AH);
+                            }
+                            setWait(10);
+                        } else {
+                            // Ждём перед следующим кликом
+                            setWait(4);
+                        }
                     } else {
-                        setState(BotState.SELL_TO_AH);
+                        // GUI почему-то закрылся, всё равно продаём
+                        if (currentTarget != null && currentTarget.isMarketItem) {
+                            setState(BotState.SELL_TO_MARKET);
+                        } else {
+                            setState(BotState.SELL_TO_AH);
+                        }
+                        setWait(10);
                     }
-                    setWait(10);
                     break;
 
                 case SELL_TO_MARKET:
@@ -634,4 +652,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-        }
+                }
