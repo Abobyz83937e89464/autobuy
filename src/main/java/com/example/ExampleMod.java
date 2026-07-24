@@ -1,25 +1,24 @@
 package com.example;
 
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.mojang.brigadier.arguments.LongArgumentType;
 
 public class ExampleMod implements ModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private boolean isActive = false;
-    private long maxBudget = 0;
     private long currentBalance = 0;
 
     private BotState currentState = BotState.IDLE;
@@ -29,6 +28,9 @@ public class ExampleMod implements ModInitializer {
     private long medianPrice = 0;
     private int observeAttempts = 0;
 
+    // Клавиша U для активации/деактивации
+    private static KeyBinding toggleKey;
+
     enum BotState {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_AH, OBSERVE, BUY_ITEM, SELL_ITEM, REST
     }
@@ -37,46 +39,31 @@ public class ExampleMod implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("AutoBuy mod initialized.");
 
-        // Регистрация клиентских команд (.startbot и .botmax)
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            dispatcher.register(
-                ClientCommandManager.literal("startbot")
-                    .executes(ctx -> {
-                        MinecraftClient client = ctx.getSource().getClient();
-                        client.execute(() -> {
-                            isActive = !isActive;
-                            sendMsg("Автобай " + (isActive ? "ВКЛЮЧЕН" : "ВЫКЛЮЧЕН"),
-                                    isActive ? Formatting.GREEN : Formatting.RED);
-                            if (isActive) {
-                                setState(BotState.CHECK_BALANCE);
-                            } else {
-                                setState(BotState.IDLE);
-                            }
-                        });
-                        return 1;
-                    })
-            );
-            dispatcher.register(
-                ClientCommandManager.literal("botmax")
-                    .then(ClientCommandManager.argument("amount", LongArgumentType.longArg())
-                        .executes(ctx -> {
-                            long amount = LongArgumentType.getLong(ctx, "amount");
-                            MinecraftClient client = ctx.getSource().getClient();
-                            client.execute(() -> {
-                                maxBudget = amount;
-                                sendMsg("Максимальный бюджет установлен: " + maxBudget, Formatting.YELLOW);
-                            });
-                            return 1;
-                        }))
-                    .executes(ctx -> {
-                        MinecraftClient client = ctx.getSource().getClient();
-                        client.execute(() -> sendMsg("Укажи сумму! Пример: .botmax 250000", Formatting.RED));
-                        return 1;
-                    })
-            );
+        // Регистрация клавиши
+        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+            "key.autobuy.toggle", // translation key
+            GLFW.GLFW_KEY_U,      // клавиша U
+            "category.autobuy"    // категория в настройках управления
+        ));
+
+        // Обработка нажатия клавиши
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // Проверяем, что интерфейс закрыт (чтобы не переключаться при вводе текста)
+            if (client.currentScreen == null && toggleKey.wasPressed()) {
+                isActive = !isActive;
+                if (isActive) {
+                    sendMsg("Бот активирован", Formatting.GREEN);
+                    setState(BotState.CHECK_BALANCE);
+                    waitTicks = 0;
+                } else {
+                    sendMsg("Бот деактивирован", Formatting.RED);
+                    setState(BotState.IDLE);
+                    waitTicks = 0;
+                }
+            }
         });
 
-        // Чтение баланса из серверного чата (без изменений)
+        // Чтение баланса из серверного чата
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;
             String text = message.getString();
@@ -89,7 +76,7 @@ public class ExampleMod implements ModInitializer {
                             currentBalance = Long.parseLong(nums);
                             sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
                             
-                            if (currentBalance <= 0 || (maxBudget > 0 && currentBalance < maxBudget * 0.1)) {
+                            if (currentBalance <= 0) {
                                 sendMsg("Мало денег. Ухожу в слип на 5 мин.", Formatting.RED);
                                 setState(BotState.REST);
                                 setWait(6000);
@@ -105,7 +92,7 @@ public class ExampleMod implements ModInitializer {
             }
         });
 
-        // Основной цикл бота (без изменений)
+        // Основной цикл бота
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (!isActive || client.player == null) return;
 
@@ -221,4 +208,4 @@ public class ExampleMod implements ModInitializer {
             });
         }
     }
-            }
+}
