@@ -64,6 +64,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int nextPageSlotId = -1;
     private boolean huntingMode = false;
 
+    // Для обработки маркета
+    private int marketAttempts = 0;
+    private static final int MAX_MARKET_ATTEMPTS = 2;
+
     private static final int MIN_LOTS_FOR_PURCHASE = 3;
 
     // Чёрный список низкоуровневой брони, инструментов, удочек
@@ -114,8 +118,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 MinecraftClient.getInstance().execute(() -> parseBalance(text));
             }
             else if (currentState == BotState.CHECK_MARKET) {
-                // Ищем "минимальная цена:" в ответе /market search
-                if (text.toLowerCase().contains("минимальная цена:")) {
+                // Ищем "минимальная цена" (без привязки к двоеточию)
+                if (text.toLowerCase().contains("минимальная цена")) {
                     MinecraftClient.getInstance().execute(() -> parseMarketPrice(text));
                 }
             }
@@ -246,10 +250,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     } else {
                         currentTarget = targets.get(currentTargetIndex);
                         if (currentTarget.isMarketItem) {
-                            // Проверяем цену на маркете
+                            marketAttempts = 0;
                             client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
                             setState(BotState.CHECK_MARKET);
-                            setWait(80);
+                            setWait(200); // увеличенный таймаут
                         } else {
                             huntingMode = true;
                             client.getNetworkHandler().sendCommand("ah");
@@ -260,9 +264,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;
 
                 case CHECK_MARKET:
-                    // Если таймаут без ответа
-                    sendMsg("Нет ответа от /market, пропускаю " + currentTarget.name, Formatting.RED);
-                    advanceTarget();
+                    // Таймаут или ответ не получен — пробуем ещё раз
+                    if (marketAttempts < MAX_MARKET_ATTEMPTS - 1) {
+                        marketAttempts++;
+                        sendMsg("Повторная попытка /market search для " + currentTarget.name, Formatting.YELLOW);
+                        MinecraftClient.getInstance().getNetworkHandler().sendCommand("market search " + currentTarget.name);
+                        setWait(200);
+                    } else {
+                        sendMsg("Не удалось получить ответ от /market, пропускаю " + currentTarget.name, Formatting.RED);
+                        advanceTarget();
+                    }
                     break;
 
                 case FIND_AND_BUY:
@@ -362,9 +373,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         if (currentTarget == null || currentState != BotState.CHECK_MARKET) return;
         try {
             String lower = text.toLowerCase();
-            int idx = lower.indexOf("минимальная цена:");
+            int idx = lower.indexOf("минимальная цена");
             if (idx == -1) return;
-            String sub = text.substring(idx + "минимальная цена:".length());
+            // Берём подстроку после "минимальная цена" и ищем число
+            String sub = text.substring(idx + "минимальная цена".length());
             String nums = sub.replaceAll("[^0-9]", "");
             if (!nums.isEmpty()) {
                 long marketPrice = Long.parseLong(nums);
@@ -379,6 +391,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     sendMsg("Маркет цена " + marketPrice + " не выше аукционной, пропускаем.", Formatting.RED);
                     advanceTarget();
                 }
+            } else {
+                advanceTarget();
             }
         } catch (Exception e) {
             advanceTarget();
@@ -412,7 +426,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             priceSamples.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
         }
 
-        // Пересчёт средних рыночных цен на ауке
         marketPrices.clear();
         itemCounts.clear();
         for (var entry : priceSamples.entrySet()) {
@@ -441,8 +454,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             if (prices == null) continue;
 
             for (long auctionPrice : prices) {
-                // Проверка баланса: не рассматриваем лоты дороже наших средств
-                if (auctionPrice > currentBalance) continue;
+                if (auctionPrice > currentBalance) continue; // контроль баланса
 
                 if (isTotem) {
                     if (auctionPrice >= 50000 && auctionPrice <= 100000) {
@@ -467,7 +479,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         }
 
-        // Сортировка: сначала маркет-товары, потом остальные, по наибольшей скидке
         targets.sort((a, b) -> {
             if (a.isMarketItem != b.isMarketItem) return a.isMarketItem ? -1 : 1;
             double discA = 1.0 - (double)a.maxPrice / marketPrices.getOrDefault(a.name, a.maxPrice);
@@ -495,7 +506,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return false;
     }
 
-    // ===================== Вспомогательные методы =====================
     private boolean isAllowedToBuy(String name) {
         String lower = name.toLowerCase();
         for (String kw : BLACKLIST_KEYWORDS) {
