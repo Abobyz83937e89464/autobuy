@@ -37,26 +37,22 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_AH, OBSERVE, BUY_ITEM, SELL_ITEM, REST  
     }  
 
-    // Точка входа "main"
     @Override
     public void onInitialize() {
         initLogic();
     }
 
-    // Точка входа "client"
     @Override
     public void onInitializeClient() {
         initLogic();
     }
 
-    // Общая логика инициализации (выполняется строго 1 раз)
     private synchronized void initLogic() {
         if (initialized) return;
         initialized = true;
 
         LOGGER.info("[AutoBuy] Мод успешно инициализирован!");
 
-        // Регистрация кнопки U в категории "Разнее"
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.autobuy.toggle",
                 InputUtil.Type.KEYSYM,
@@ -64,12 +60,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
-        // Слушатель сообщений
+        // Чтение баланса из чата (ловим любое сообщение с цифрами)
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {  
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;  
             String text = message.getString();  
 
-            if (text.contains("Баланс:") || text.toLowerCase().contains("balance")) {  
+            // Ищем баланс в любом сообщении, содержащем "balance" или "баланс"
+            if (text.toLowerCase().contains("balance") || text.toLowerCase().contains("баланс")) {  
                 MinecraftClient.getInstance().execute(() -> {  
                     try {  
                         String nums = text.replaceAll("[^0-9]", "");  
@@ -92,11 +89,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }  
         });  
 
-        // Тик-цикл бота
+        // Основной цикл
         ClientTickEvents.END_CLIENT_TICK.register(client -> {  
             if (client.player == null) return;  
 
-            // Обработка бинда U
+            // Бинд U (не трогаем)
             while (toggleKey.wasPressed()) {  
                 isActive = !isActive;  
                 if (isActive) {  
@@ -122,12 +119,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     break;  
 
                 case CHECK_BALANCE:  
-                    client.getNetworkHandler().sendCommand("money");  
+                    client.getNetworkHandler().sendCommand("balance");  // вместо /money
                     setWait(100);  
                     break;  
 
                 case OPEN_AH:  
-                    client.getNetworkHandler().sendCommand("ah category netherite");  
+                    client.getNetworkHandler().sendCommand("ah search незер"); // ищем "незер"
                     setState(BotState.SCAN_AH);  
                     setWait(40);  
                     break;  
@@ -184,7 +181,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     }  
                     setState(BotState.SELL_ITEM);  
                     setWait(40);  
-                    client.setScreen(null);  
+                    // Больше не закрываем GUI – меню остаётся на экране
                     break;  
 
                 case SELL_ITEM:  
