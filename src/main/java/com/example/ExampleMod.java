@@ -1,6 +1,7 @@
 package com.example;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
@@ -15,12 +16,12 @@ import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class ExampleMod implements ClientModInitializer {
+public class ExampleMod implements ModInitializer, ClientModInitializer {
     public static final String MOD_ID = "autobuy";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    // Переменная для зарегистрированного бинда
     private static KeyBinding toggleKey;
+    private static boolean initialized = false;
 
     private boolean isActive = false;  
     private long currentBalance = 0;  
@@ -36,19 +37,34 @@ public class ExampleMod implements ClientModInitializer {
         IDLE, CHECK_BALANCE, OPEN_AH, SCAN_AH, OBSERVE, BUY_ITEM, SELL_ITEM, REST  
     }  
 
-    @Override  
-    public void onInitializeClient() {  
-        LOGGER.info("AutoBuy mod initialized.");  
+    // Точка входа "main"
+    @Override
+    public void onInitialize() {
+        initLogic();
+    }
 
-        // Регистрируем кнопку U в стандартной категории "Разное" (KeyBinding.MISC_CATEGORY)
+    // Точка входа "client"
+    @Override
+    public void onInitializeClient() {
+        initLogic();
+    }
+
+    // Общая логика инициализации (выполняется строго 1 раз)
+    private synchronized void initLogic() {
+        if (initialized) return;
+        initialized = true;
+
+        LOGGER.info("[AutoBuy] Мод успешно инициализирован!");
+
+        // Регистрация кнопки U в категории "Разнее"
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.autobuy.toggle",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_U,
-                KeyBinding.MISC_CATEGORY
+                "key.categories.misc"
         ));
 
-        // Отслеживание сообщений о балансе
+        // Слушатель сообщений
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {  
             if (!isActive || currentState != BotState.CHECK_BALANCE) return;  
             String text = message.getString();  
@@ -76,11 +92,11 @@ public class ExampleMod implements ClientModInitializer {
             }  
         });  
 
-        // Главный тик-цикл бота
+        // Тик-цикл бота
         ClientTickEvents.END_CLIENT_TICK.register(client -> {  
             if (client.player == null) return;  
 
-            // Обработка нажатия кнопки U (срабатывает ровно 1 раз за клик)
+            // Обработка бинда U
             while (toggleKey.wasPressed()) {  
                 isActive = !isActive;  
                 if (isActive) {  
