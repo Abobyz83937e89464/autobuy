@@ -16,9 +16,12 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -132,7 +135,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Добыча алмаза
+                // Добыча алмаза, если мы рядом
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     if (isDiamond(client.world, target)) {
@@ -148,62 +151,79 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
                         pickupTicks = 20;
                     }
+                    return;
+                }
+
+                // === ПРЯМОЛИНЕЙНОЕ ДВИЖЕНИЕ К АЛМАЗУ ===
+                // Всегда смотрим на цель
+                faceTarget(client, targetCenter);
+
+                // Получаем луч от глаз в направлении взгляда
+                Vec3d lookVec = client.player.getRotationVec(1.0F);
+                // Ищем первый блок на пути, который не является воздухом/алмазом/бедроком (ломаемый)
+                BlockPos obstacle = findFirstBreakableBlock(client, eyePos, lookVec, dist);
+
+                // Проверяем, есть ли неломаемое препятствие (бедрок) прямо перед нами
+                BlockPos bedrockInFront = findBedrockInFront(client, eyePos, lookVec, 2.0);
+
+                // Если бедрок впереди, пробуем обойти
+                if (bedrockInFront != null && obstacle == null) {
+                    // Бедрок, но нет ломаемого блока – пытаемся сместиться в сторону
+                    Vec3d right = lookVec.crossProduct(new Vec3d(0, 1, 0)).normalize();
+                    // Проверяем, свободно ли справа или слева
+                    BlockPos rightPos = client.player.getBlockPos().add(Direction.fromHorizontalDegrees(client.player.getYaw() + 90).getVector());
+                    BlockPos leftPos = client.player.getBlockPos().add(Direction.fromHorizontalDegrees(client.player.getYaw() - 90).getVector());
+                    if (isPassable(client.world, rightPos) && isPassable(client.world, rightPos.up())) {
+                        // Смещаемся вправо
+                        client.options.leftKey.setPressed(false);
+                        client.options.rightKey.setPressed(true);
+                        client.options.forwardKey.setPressed(false);
+                        client.options.attackKey.setPressed(false);
+                        client.options.jumpKey.setPressed(false);
+                    } else if (isPassable(client.world, leftPos) && isPassable(client.world, leftPos.up())) {
+                        client.options.rightKey.setPressed(false);
+                        client.options.leftKey.setPressed(true);
+                    } else {
+                        // Не можем обойти, стоим на месте
+                        stopMovement(client);
+                    }
+                    return;
+                }
+
+                // Обычное движение: копаем препятствие или идём
+                if (obstacle != null && canBreak(client.world, obstacle)) {
+                    // Ломаем препятствие, одновременно идём вперёд
+                    client.options.attackKey.setPressed(true);
+                    client.options.forwardKey.setPressed(true);
+                    client.options.jumpKey.setPressed(false);
+                } else if (obstacle != null && !canBreak(client.world, obstacle)) {
+                    // Неломаемое, но не бедрок (например, коренная порода, но у нас проверка isSolid исключает бедрок, так что сюда не должно попасть)
+                    // На всякий случай стоим
+                    stopMovement(client);
                 } else {
+                    // Путь свободен – идём вперёд
+                    client.options.attackKey.setPressed(false);
+                    client.options.forwardKey.setPressed(true);
+                    // Прыгаем только если нужно подняться на блок
                     BlockPos playerFeet = client.player.getBlockPos();
                     int deltaY = target.getY() - playerFeet.getY();
-
-                    // Подъём
                     if (deltaY > 0) {
                         Direction dir = Direction.fromHorizontalDegrees((double) client.player.getYaw());
                         BlockPos frontFeet = playerFeet.add(dir.getVector());
-                        BlockPos frontHead = frontFeet.up();
-                        BlockPos frontAbove = frontHead.up();
-
-                        boolean feetSolid = isSolid(client.world, frontFeet);
-                        boolean headSolid = isSolid(client.world, frontHead);
-                        boolean aboveSolid = isSolid(client.world, frontAbove);
-
-                        if (aboveSolid) {
-                            safeMine(client, frontAbove);
-                        } else if (headSolid) {
-                            safeMine(client, frontHead);
-                        } else if (feetSolid) {
-                            if (isAir(client.world, frontFeet.up(2)) && canBreak(client.world, frontFeet)) {
-                                client.options.jumpKey.setPressed(true);
-                                client.options.forwardKey.setPressed(true);
-                                client.options.attackKey.setPressed(false);
-                            } else {
-                                safeMine(client, frontFeet);
-                            }
+                        if (isSolid(client.world, frontFeet) && isAir(client.world, frontFeet.up())) {
+                            client.options.jumpKey.setPressed(true);
                         } else {
-                            client.options.forwardKey.setPressed(true);
                             client.options.jumpKey.setPressed(false);
-                            client.options.attackKey.setPressed(false);
                         }
-                        return;
-                    }
-
-                    // Спуск
-                    if (deltaY < 0) {
+                    } else if (deltaY < 0) {
+                        // Если цель ниже, пытаемся копать под собой
                         BlockPos below = playerFeet.down();
                         if (isSolid(client.world, below)) {
-                            safeMine(client, below);
-                            return;
+                            client.options.attackKey.setPressed(true);
+                            client.options.forwardKey.setPressed(false);
+                            client.options.jumpKey.setPressed(false);
                         }
-                    }
-
-                    // Горизонтальное движение с улучшенным обнаружением препятствий
-                    BlockPos obstacle = findBestObstacle(client, targetCenter);
-                    if (obstacle != null) {
-                        // Препятствие найдено, ломаем его (бот повернётся к нему автоматически в safeMine)
-                        // Если препятствие нельзя сломать (бедрок), safeMine ничего не делает – тогда бот будет стоять.
-                        // Чтобы не застревать, можно добавить обход, но пока оставим.
-                        safeMine(client, obstacle);
                     } else {
-                        // Путь свободен – идём прямо к цели
-                        faceTarget(client, targetCenter);
-                        client.options.forwardKey.setPressed(true);
-                        client.options.attackKey.setPressed(false);
                         client.options.jumpKey.setPressed(false);
                     }
                 }
@@ -343,11 +363,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ДВИЖЕНИЕ И ДОБЫЧА ========================
+    // ======================== НАВИГАЦИОННЫЕ ПОМОЩНИКИ ========================
     private void stopMovement(MinecraftClient client) {
         client.options.forwardKey.setPressed(false);
         client.options.attackKey.setPressed(false);
         client.options.jumpKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
     }
 
     private void faceTarget(MinecraftClient client, Vec3d target) {
@@ -359,19 +381,57 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.player.setPitch((float)pitch);
     }
 
-    private void safeMine(MinecraftClient client, BlockPos targetBlock) {
-        if (canBreak(client.world, targetBlock)) {
-            faceTarget(client, Vec3d.ofCenter(targetBlock));
-            client.options.attackKey.setPressed(true);
-            client.options.forwardKey.setPressed(false);
-            client.options.jumpKey.setPressed(false);
-        } else {
-            // Блок нельзя сломать (бедрок). Стоим на месте, возможно, нужно обходить.
-            // Пока ничего не делаем, чтобы не было ненужных движений.
-            client.options.attackKey.setPressed(false);
-            client.options.forwardKey.setPressed(false);
-            client.options.jumpKey.setPressed(false);
+    /** Поиск первого ломаемого блока (не воздух/алмаз/бедрок) на пути луча */
+    private BlockPos findFirstBreakableBlock(MinecraftClient client, Vec3d start, Vec3d direction, double maxDistance) {
+        Vec3d end = start.add(direction.multiply(maxDistance));
+        // Используем raycast для получения точного пересечения
+        BlockHitResult hit = client.world.raycast(new RaycastContext(
+                start, end,
+                RaycastContext.ShapeType.COLLIDER,
+                RaycastContext.FluidHandling.NONE,
+                client.player
+        ));
+        if (hit.getType() == HitResult.Type.BLOCK) {
+            BlockPos pos = hit.getBlockPos();
+            if (isSolid(client.world, pos)) { // isSolid исключает воздух, алмаз, бедрок
+                return pos;
+            }
         }
+        // Если точный рейкаст ничего не дал, проверяем вручную с шагом
+        double step = 0.2;
+        Vec3d current = start;
+        BlockPos last = null;
+        for (double d = 0; d < maxDistance; d += step) {
+            current = start.add(direction.multiply(d));
+            BlockPos pos = new BlockPos((int)Math.floor(current.x), (int)Math.floor(current.y), (int)Math.floor(current.z));
+            if (!pos.equals(last)) {
+                last = pos;
+                if (isSolid(client.world, pos)) return pos;
+            }
+        }
+        return null;
+    }
+
+    /** Проверяет, есть ли бедрок прямо перед игроком (на уровне ног/головы) в пределах distance */
+    private BlockPos findBedrockInFront(MinecraftClient client, Vec3d start, Vec3d direction, double distance) {
+        double step = 0.2;
+        Vec3d current = start;
+        BlockPos last = null;
+        for (double d = 0; d < distance; d += step) {
+            current = start.add(direction.multiply(d));
+            BlockPos pos = new BlockPos((int)Math.floor(current.x), (int)Math.floor(current.y), (int)Math.floor(current.z));
+            if (!pos.equals(last)) {
+                last = pos;
+                if (client.world.getBlockState(pos).isOf(Blocks.BEDROCK)) return pos;
+            }
+        }
+        return null;
+    }
+
+    /** Можно ли пройти сквозь блок (воздух, алмаз, жидкость – не твёрдый) */
+    private boolean isPassable(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isAir() || isDiamond(world, pos) || state.isOf(Blocks.LAVA) || state.isOf(Blocks.WATER);
     }
 
     private BlockPos findNearestDiamond(MinecraftClient client) {
@@ -401,25 +461,14 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
-    /**
-     * Точечные фильтры: игнорирует алмазы, которые невозможно/опасно добывать.
-     */
+    /** Точечные фильтры */
     private boolean isValidDiamondTarget(World world, BlockPos pos) {
-        // Над лавой? (проверяем 3 блока вниз)
         for (int dy = 1; dy <= 3; dy++) {
-            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) {
-                return false;
-            }
+            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) return false;
         }
-        // Под бедроком?
-        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) {
-            return false;
-        }
-        // На уровне бедрока (соседи по горизонтали)?
+        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) return false;
         if (isBedrock(world, pos.north()) || isBedrock(world, pos.south()) ||
-            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) {
-            return false;
-        }
+            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) return false;
         return true;
     }
 
@@ -427,56 +476,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return world.getBlockState(pos).isAir();
     }
 
-    /** Блок твёрдый, но не бедрок и не алмаз */
+    /** Твёрдый блок, который нужно ломать (не воздух, не алмаз, не бедрок) */
     private boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !isDiamond(world, pos) && !state.isOf(Blocks.BEDROCK);
     }
 
-    /** Можно ли сломать блок (не воздух, не бедрок) */
     private boolean canBreak(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !state.isOf(Blocks.BEDROCK);
-    }
-
-    /**
-     * Ищет ближайшее препятствие на пути к цели с учётом боковых блоков (ширина игрока).
-     * Возвращает позицию препятствия или null, если путь свободен.
-     */
-    private BlockPos findBestObstacle(MinecraftClient client, Vec3d targetCenter) {
-        Vec3d eyePos = client.player.getEyePos();
-        Vec3d dir = targetCenter.subtract(eyePos).normalize();
-        double maxDist = eyePos.distanceTo(targetCenter) - 0.5;
-        double step = 0.3;
-        // Вектор вправо для проверки боковых точек
-        Vec3d right = dir.crossProduct(new Vec3d(0, 1, 0)).normalize();
-        double halfWidth = 0.3; // половина ширины игрока
-
-        Vec3d currentPos = eyePos;
-        BlockPos lastHead = null;
-
-        for (double d = 0; d < maxDist; d += step) {
-            currentPos = eyePos.add(dir.multiply(d));
-            // Проверяем три точки на каждом уровне: центр, влево, вправо
-            Vec3d[] offsets = {
-                currentPos,
-                currentPos.add(right.multiply(halfWidth)),
-                currentPos.add(right.multiply(-halfWidth))
-            };
-
-            for (Vec3d point : offsets) {
-                BlockPos headPos = new BlockPos((int)Math.floor(point.x), (int)Math.floor(point.y), (int)Math.floor(point.z));
-                BlockPos feetPos = headPos.down();
-
-                // Проверяем голову и ноги
-                if (!headPos.equals(lastHead)) { // небольшая оптимизация
-                    if (isSolid(client.world, headPos)) return headPos;
-                    if (isSolid(client.world, feetPos)) return feetPos;
-                }
-            }
-            lastHead = new BlockPos((int)Math.floor(currentPos.x), (int)Math.floor(currentPos.y), (int)Math.floor(currentPos.z));
-        }
-        return null;
     }
 
     private void sendMsg(String msg, Formatting color) {
