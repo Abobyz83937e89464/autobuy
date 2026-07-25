@@ -46,7 +46,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private Direction avoidDirection = null;
     private BlockPos avoidOriginalTarget = null;
 
-    // Система следования по точкам маршрута
+    // Планировщик
     private List<BlockPos> plannedRoute = new ArrayList<>();
     private int routeIndex = 0;
     private BlockPos currentMineTarget = null;
@@ -107,19 +107,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             if (!active) return;
 
             try {
-                // Побег из бедроковой ловушки
                 if (escaping) {
                     handleEscape(client);
                     return;
                 }
 
-                // Проверка на ловушку каждые 2 секунды
                 if (client.player.age % 40 == 0 && isTrapped(client)) {
                     startEscape(client);
                     return;
                 }
 
-                // Подбор предметов после добычи
                 if (pickupTicks > 0) {
                     pickupTicks--;
                     Vec3d targetCenter = Vec3d.ofCenter(target);
@@ -139,7 +136,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Поиск алмаза
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -156,7 +152,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Добыча алмаза, если он рядом
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(isDiamond(client.world, target));
@@ -175,58 +170,17 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Если выполняется обход бедрока
                 if (avoidingBedrock) {
                     handleBedrockAvoidance(client);
                     return;
                 }
 
-                // Следование по запланированному маршруту
-                if (plannedRoute.isEmpty()) {
-                    plannedRoute = planRoute(client, client.player.getBlockPos(), target);
-                    if (plannedRoute.isEmpty()) {
-                        sendMsg("Путь не найден, ищу другой алмаз.", Formatting.RED);
-                        target = null;
-                        return;
-                    }
-                }
-
-                // Убираем пройденные точки
-                while (routeIndex < plannedRoute.size() && reached(client.player.getBlockPos(), plannedRoute.get(routeIndex))) {
-                    routeIndex++;
-                }
-                if (routeIndex >= plannedRoute.size()) {
-                    // все точки пройдены, но мы не у цели — перестроим маршрут
-                    plannedRoute = planRoute(client, client.player.getBlockPos(), target);
-                    routeIndex = 0;
-                    if (plannedRoute.isEmpty()) {
-                        sendMsg("Путь потерян, ищу другой алмаз.", Formatting.RED);
-                        target = null;
-                        return;
-                    }
-                }
-
-                BlockPos nextStep = plannedRoute.get(routeIndex);
-
-                // Если блок на пути непроходим – копаем его
-                if (!isPassable(client.world, nextStep) || !isPassable(client.world, nextStep.up())) {
-                    currentMineTarget = nextStep;
-                    safeMine(client, currentMineTarget);
-                    mineStuckTicks++;
-                    if (mineStuckTicks > 60) { // больше 3 секунд – сброс
-                        plannedRoute.clear();
-                        mineStuckTicks = 0;
-                    }
-                    return;
+                // Следование по маршруту, если он есть, иначе прямое движение
+                if (!plannedRoute.isEmpty()) {
+                    followRoute(client);
                 } else {
-                    mineStuckTicks = 0;
+                    navigateStraight(client);
                 }
-
-                // Движение к следующей точке маршрута
-                faceTarget(client, Vec3d.ofCenter(nextStep));
-                client.options.forwardKey.setPressed(true);
-                client.options.jumpKey.setPressed(shouldJump(client, nextStep));
-                client.options.attackKey.setPressed(false);
 
             } catch (Exception e) {
                 sendMsg("Ошибка: " + e.getMessage(), Formatting.RED);
@@ -238,7 +192,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Полный рендеринг трассера и обводки (без изменений)
+        // Полный рендеринг трассера и обводки
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -354,12 +308,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ПЛАНИРОВАНИЕ МАРШРУТА ========================
+    // ======================== ПЛАНИРОВЩИК МАРШРУТА ========================
     private List<BlockPos> planRoute(MinecraftClient client, BlockPos start, BlockPos goal) {
         World world = client.world;
         if (world == null) return new ArrayList<>();
 
-        // BFS для поиска кратчайшего пути
         Queue<BlockPos> queue = new LinkedList<>();
         Map<BlockPos, BlockPos> cameFrom = new HashMap<>();
         Set<BlockPos> visited = new HashSet<>();
@@ -369,25 +322,18 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         cameFrom.put(start, null);
 
         boolean found = false;
-
         while (!queue.isEmpty()) {
             BlockPos current = queue.poll();
-
             if (current.equals(goal)) {
                 found = true;
                 break;
             }
 
-            // Проверяем 6 направлений (все, включая вверх/вниз)
             for (Direction dir : Direction.values()) {
                 BlockPos neighbor = current.offset(dir);
-
-                // Ограничение дальности поиска
                 if (Math.abs(neighbor.getX() - start.getX()) > PATHFIND_RADIUS ||
                     Math.abs(neighbor.getY() - start.getY()) > PATHFIND_RADIUS ||
-                    Math.abs(neighbor.getZ() - start.getZ()) > PATHFIND_RADIUS) {
-                    continue;
-                }
+                    Math.abs(neighbor.getZ() - start.getZ()) > PATHFIND_RADIUS) continue;
 
                 if (!visited.contains(neighbor) && canStandAt(world, neighbor)) {
                     visited.add(neighbor);
@@ -397,38 +343,59 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         }
 
-        if (!found) {
-            // Если путь не найден, возвращаем пустой список – бот будет искать другой алмаз
-            return new ArrayList<>();
-        }
+        if (!found) return new ArrayList<>();
 
-        // Восстановление маршрута от цели к старту
         List<BlockPos> route = new ArrayList<>();
         BlockPos current = goal;
         while (current != null && !current.equals(start)) {
             route.add(current);
             current = cameFrom.get(current);
         }
-        // Разворачиваем: от старта к цели
         Collections.reverse(route);
-
         return route;
     }
 
-    /**
-     * Может ли игрок стоять в этой позиции (учитываем высоту 2 блока)?
-     * Блок считается проходимым, если это воздух или алмазная руда.
-     * Лава и бедрок НЕ проходимы.
-     */
     private boolean canStandAt(World world, BlockPos pos) {
-        // Блок на уровне ног и блок над головой должны быть проходимы
         return isPassable(world, pos) && isPassable(world, pos.up());
     }
 
     private boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        // Проходим только через воздух или алмаз (чтобы бот шёл прямо к руде)
         return state.isAir() || isDiamond(world, pos);
+    }
+
+    // ======================== СЛЕДОВАНИЕ ПО МАРШРУТУ ========================
+    private void followRoute(MinecraftClient client) {
+        // Убираем пройденные точки
+        while (routeIndex < plannedRoute.size() && reached(client.player.getBlockPos(), plannedRoute.get(routeIndex))) {
+            routeIndex++;
+        }
+
+        if (routeIndex >= plannedRoute.size()) {
+            plannedRoute.clear();
+            return; // попытаемся перестроить в следующем тике
+        }
+
+        BlockPos nextStep = plannedRoute.get(routeIndex);
+
+        // Если блок непроходим (лава/бедрок уже исключены, но твёрдый блок нужно ломать)
+        if (!isPassable(client.world, nextStep) || !isPassable(client.world, nextStep.up())) {
+            currentMineTarget = nextStep;
+            safeMine(client, currentMineTarget);
+            mineStuckTicks++;
+            if (mineStuckTicks > 60) {
+                plannedRoute.clear();
+                mineStuckTicks = 0;
+            }
+            return;
+        } else {
+            mineStuckTicks = 0;
+        }
+
+        faceTarget(client, Vec3d.ofCenter(nextStep));
+        client.options.forwardKey.setPressed(true);
+        client.options.jumpKey.setPressed(shouldJump(client, nextStep));
+        client.options.attackKey.setPressed(false);
     }
 
     private boolean shouldJump(MinecraftClient client, BlockPos targetPos) {
@@ -437,12 +404,134 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private boolean reached(BlockPos playerFeet, BlockPos targetPos) {
-        // Считаем, что достигли, если находимся в том же блоке или очень близко
         return playerFeet.getSquaredDistance(targetPos) < 1.5;
     }
 
-    // ======================== ОБХОД БЕДРОКА (заглушка, не используется при планировании, но оставлен) ========================
-    private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir) {
+    // ======================== ЗАПАСНОЕ ПРЯМОЕ ДВИЖЕНИЕ ========================
+    private void navigateStraight(MinecraftClient client) {
+        BlockPos playerFeet = client.player.getBlockPos();
+        Direction forward = Direction.fromHorizontalDegrees(client.player.getYaw());
+
+        if (currentMineTarget != null) {
+            if (isSolidOrLavaOrBedrock(client.world, currentMineTarget) && canBreak(client.world, currentMineTarget)) {
+                safeMine(client, currentMineTarget);
+                mineStuckTicks++;
+                if (mineStuckTicks > 40) {
+                    currentMineTarget = null;
+                    mineStuckTicks = 0;
+                }
+                return;
+            } else {
+                currentMineTarget = null;
+                mineStuckTicks = 0;
+            }
+        }
+
+        int deltaY = target.getY() - playerFeet.getY();
+        BlockPos frontFeet = playerFeet.add(forward.getVector());
+        BlockPos frontHead = frontFeet.up();
+        BlockPos frontAbove = frontFeet.up(2);
+        BlockPos aboveFeet = playerFeet.up();
+        BlockPos aboveHead = playerFeet.up(2);
+
+        if (deltaY > 0) {
+            if (isSolidOrLavaOrBedrock(client.world, frontAbove)) {
+                if (isLava(client.world, frontAbove) || isBedrock(client.world, frontAbove)) {
+                    startBedrockAvoidance(client, forward, frontAbove);
+                    return;
+                }
+                currentMineTarget = frontAbove;
+                safeMine(client, frontAbove);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, frontHead)) {
+                if (isLava(client.world, frontHead) || isBedrock(client.world, frontHead)) {
+                    startBedrockAvoidance(client, forward, frontHead);
+                    return;
+                }
+                currentMineTarget = frontHead;
+                safeMine(client, frontHead);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, frontFeet)) {
+                if (isLava(client.world, frontFeet) || isBedrock(client.world, frontFeet)) {
+                    startBedrockAvoidance(client, forward, frontFeet);
+                    return;
+                }
+                if (isSolidOrLavaOrBedrock(client.world, aboveFeet) && client.player.isOnGround()) {
+                    currentMineTarget = aboveFeet;
+                    safeMine(client, aboveFeet);
+                    return;
+                }
+                client.options.forwardKey.setPressed(true);
+                client.options.jumpKey.setPressed(client.player.isOnGround());
+                client.options.attackKey.setPressed(false);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, aboveFeet) && client.player.isOnGround()) {
+                currentMineTarget = aboveFeet;
+                safeMine(client, aboveFeet);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, aboveHead) && client.player.isOnGround()) {
+                currentMineTarget = aboveHead;
+                safeMine(client, aboveHead);
+                return;
+            }
+            client.options.forwardKey.setPressed(true);
+            client.options.jumpKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+            return;
+        }
+
+        if (deltaY < 0) {
+            BlockPos below = playerFeet.down();
+            if (isSolidOrLavaOrBedrock(client.world, below)) {
+                if (isLava(client.world, below) || isBedrock(client.world, below)) {
+                    startBedrockAvoidance(client, forward, below);
+                    return;
+                }
+                currentMineTarget = below;
+                safeMine(client, below);
+                return;
+            }
+            client.options.forwardKey.setPressed(true);
+            client.options.jumpKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+            return;
+        }
+
+        if (isSolidOrLavaOrBedrock(client.world, frontFeet) || isSolidOrLavaOrBedrock(client.world, frontHead)) {
+            if ((isSolidOrLavaOrBedrock(client.world, frontFeet) && (isLava(client.world, frontFeet) || isBedrock(client.world, frontFeet))) ||
+                (isSolidOrLavaOrBedrock(client.world, frontHead) && (isLava(client.world, frontHead) || isBedrock(client.world, frontHead)))) {
+                startBedrockAvoidance(client, forward,
+                    isSolidOrLavaOrBedrock(client.world, frontFeet) ? frontFeet : frontHead);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, frontFeet) && canBreak(client.world, frontFeet)) {
+                currentMineTarget = frontFeet;
+                safeMine(client, frontFeet);
+                client.options.forwardKey.setPressed(true);
+                return;
+            }
+            if (isSolidOrLavaOrBedrock(client.world, frontHead) && canBreak(client.world, frontHead)) {
+                currentMineTarget = frontHead;
+                safeMine(client, frontHead);
+                client.options.forwardKey.setPressed(true);
+                return;
+            }
+            stopMovement(client);
+            return;
+        }
+
+        faceTarget(client, Vec3d.ofCenter(target));
+        client.options.forwardKey.setPressed(true);
+        client.options.jumpKey.setPressed(false);
+        client.options.attackKey.setPressed(false);
+    }
+
+    // ======================== ОБХОД БЕДРОКА/ЛАВЫ ========================
+    private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir, BlockPos obstacle) {
         Direction rightDir = blockedDir.rotateYClockwise();
         Direction leftDir = blockedDir.rotateYCounterclockwise();
         BlockPos playerFeet = client.player.getBlockPos();
@@ -457,14 +546,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             stopMovement(client);
             target = null;
             plannedRoute.clear();
-            sendMsg("Нет пути для обхода бедрока, ищу другой алмаз.", Formatting.RED);
+            sendMsg("Нет пути для обхода, ищу другой алмаз.", Formatting.RED);
             return;
         }
 
         avoidingBedrock = true;
         avoidTicks = 0;
         avoidOriginalTarget = target;
-        sendMsg("Обхожу бедрок...", Formatting.YELLOW);
+        String reason = isLava(client.world, obstacle) ? "лаву" : "бедрок";
+        sendMsg("Обхожу " + reason + "...", Formatting.YELLOW);
     }
 
     private void handleBedrockAvoidance(MinecraftClient client) {
@@ -494,7 +584,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
-    // ======================== ДВИЖЕНИЕ И КОПАНИЕ ========================
+    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
     private void safeMine(MinecraftClient client, BlockPos pos) {
         if (!canBreak(client.world, pos)) return;
         faceBlock(client, pos);
@@ -506,6 +596,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private boolean canBreak(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !state.isOf(Blocks.BEDROCK) && !state.isOf(Blocks.LAVA);
+    }
+
+    private boolean isSolidOrLavaOrBedrock(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return !state.isAir() && !isDiamond(world, pos);
     }
 
     private void faceBlock(MinecraftClient client, BlockPos pos) {
@@ -576,7 +671,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return true;
     }
 
-    // ======================== УТИЛИТЫ ========================
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -585,4 +679,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                             }
+            }
