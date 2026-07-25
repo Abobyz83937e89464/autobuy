@@ -13,6 +13,8 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -29,7 +31,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     private boolean active = false;
     private BlockPos target = null;
-    private boolean mining = false;
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
@@ -65,23 +66,22 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 if (active) {
                     sendMsg("Авто-шахтёр активирован", Formatting.GREEN);
                     target = null;
-                    mining = false;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
                     stopMovement(client);
                     target = null;
-                    mining = false;
                 }
             }
 
             if (!active) return;
 
             try {
+                // Если нет цели – ищем ближайший алмаз
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
-                        sendMsg("Алмазы не найдены в радиусе " + SCAN_RADIUS + " блоков", Formatting.YELLOW);
-                        active = false;
+                        // Не нашли – просто ждём, не отключаемся, возможно появятся позже
+                        stopMovement(client);
                         return;
                     }
                     sendMsg("Найден алмаз: " + target.getX() + ", " + target.getY() + ", " + target.getZ(), Formatting.AQUA);
@@ -91,46 +91,52 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
+                // Если уже рядом – добываем алмаз
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(true);
-                    mining = true;
+                    client.options.forwardKey.setPressed(false);
 
+                    // Проверяем, не исчез ли алмаз (добыт)
                     if (!isDiamond(client.world, target)) {
                         client.options.attackKey.setPressed(false);
-                        sendMsg("Алмаз добыт! Отключаюсь.", Formatting.GREEN);
-                        active = false;
-                        target = null;
-                        mining = false;
+                        sendMsg("Алмаз добыт! Ищу следующий.", Formatting.GREEN);
+                        target = null; // Запустит поиск нового алмаза
                     }
                 } else {
-                    if (mining) {
-                        client.options.attackKey.setPressed(false);
-                        mining = false;
-                    }
-                    faceTarget(client, targetCenter);
-                    client.options.forwardKey.setPressed(true);
-
-                    Vec3d lookDir = client.player.getRotationVec(1.0F);
-                    Vec3d hitPos = eyePos.add(lookDir.multiply(0.5, 0.5, 0.5));
-                    BlockPos frontBlock = new BlockPos((int)Math.floor(hitPos.x), (int)Math.floor(hitPos.y), (int)Math.floor(hitPos.z));
-                    if (!client.world.getBlockState(frontBlock).isAir() &&
-                        !client.world.getBlockState(frontBlock).isOf(Blocks.DIAMOND_ORE) &&
-                        !client.world.getBlockState(frontBlock).isOf(Blocks.DEEPSLATE_DIAMOND_ORE)) {
-                        client.options.attackKey.setPressed(true);
+                    // Движемся к цели, разрушая препятствия
+                    BlockPos obstacle = findObstacle(client, targetCenter);
+                    if (obstacle != null) {
+                        // Есть блок на пути – идём к нему и ломаем
+                        Vec3d obstacleCenter = Vec3d.ofCenter(obstacle);
+                        double distToObstacle = eyePos.distanceTo(obstacleCenter);
+                        if (distToObstacle > REACH_DISTANCE) {
+                            // Идём к препятствию
+                            faceTarget(client, obstacleCenter);
+                            client.options.forwardKey.setPressed(true);
+                            client.options.attackKey.setPressed(false);
+                        } else {
+                            // Ломаем препятствие
+                            faceTarget(client, obstacleCenter);
+                            client.options.attackKey.setPressed(true);
+                            client.options.forwardKey.setPressed(false);
+                        }
                     } else {
+                        // Нет препятствий – идём прямо к алмазу
+                        faceTarget(client, targetCenter);
+                        client.options.forwardKey.setPressed(true);
                         client.options.attackKey.setPressed(false);
                     }
                 }
             } catch (Exception e) {
                 sendMsg("Ошибка: " + e.getMessage(), Formatting.RED);
-                active = false;
-                stopMovement(client);
+                // Не выключаем бота, просто сбрасываем цель и пробуем снова
                 target = null;
-                mining = false;
+                stopMovement(client);
             }
         });
 
+        // Рендеринг трассера и обводки остаётся без изменений
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -158,6 +164,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             float maxY = minY + 1.0f;
             float maxZ = minZ + 1.0f;
 
+            // ... (рендер куба, как в предыдущей версии, для краткости опущен, но он есть)
             // Нижняя грань
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -167,7 +174,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
-
             // Верхняя грань
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -177,7 +183,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
-
             // Вертикали
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -234,6 +239,34 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private boolean isDiamond(World world, BlockPos pos) {
         return world.getBlockState(pos).isOf(Blocks.DIAMOND_ORE) ||
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
+    }
+
+    /**
+     * Ищет первый блок на пути к цели, который не является воздухом или алмазной рудой.
+     * Возвращает позицию этого блока или null, если путь свободен.
+     */
+    private BlockPos findObstacle(MinecraftClient client, Vec3d targetCenter) {
+        Vec3d eyePos = client.player.getEyePos();
+        Vec3d dir = targetCenter.subtract(eyePos).normalize();
+        double maxDist = eyePos.distanceTo(targetCenter) - 0.5; // не доходя до самой цели
+
+        // Шагаем с шагом 0.3 блока
+        double step = 0.3;
+        Vec3d currentPos = eyePos;
+        BlockPos lastBlock = null;
+
+        for (double d = 0; d < maxDist; d += step) {
+            currentPos = eyePos.add(dir.multiply(d));
+            BlockPos blockPos = new BlockPos((int)Math.floor(currentPos.x), (int)Math.floor(currentPos.y), (int)Math.floor(currentPos.z));
+            if (!blockPos.equals(lastBlock)) {
+                lastBlock = blockPos;
+                if (!client.world.getBlockState(blockPos).isAir() &&
+                    !isDiamond(client.world, blockPos)) {
+                    return blockPos;
+                }
+            }
+        }
+        return null;
     }
 
     private void sendMsg(String msg, Formatting color) {
