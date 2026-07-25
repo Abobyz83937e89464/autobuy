@@ -391,7 +391,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.options.attackKey.setPressed(false);
     }
 
-    // ======================== ОБХОД БЕДРОКА ========================
+    // ======================== ОБХОД БЕДРОКА (исправлено зацикливание) ========================
     private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir) {
         Direction rightDir = blockedDir.rotateYClockwise();
         Direction leftDir = blockedDir.rotateYCounterclockwise();
@@ -402,8 +402,18 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         } else if (isPassable(client.world, playerFeet.add(leftDir.getVector())) &&
                    isPassable(client.world, playerFeet.add(leftDir.getVector()).up())) {
             avoidDirection = leftDir;
-        } else { stopMovement(client); return; }
-        avoidingBedrock = true; avoidTicks = 0; avoidOriginalTarget = target;
+        } else {
+            // Невозможно обойти – сбрасываем обход и цель, чтобы не зациклиться
+            avoidingBedrock = false;
+            stopMovement(client);
+            target = null; // ищем другой алмаз
+            sendMsg("Нет пути для обхода бедрока, ищу другой алмаз.", Formatting.RED);
+            return;
+        }
+
+        avoidingBedrock = true;
+        avoidTicks = 0;
+        avoidOriginalTarget = target;
         sendMsg("Обхожу бедрок...", Formatting.YELLOW);
     }
 
@@ -428,7 +438,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             client.options.attackKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
         } else {
-            avoidingBedrock = false; avoidTicks = 0; stopMovement(client);
+            avoidingBedrock = false;
+            avoidTicks = 0;
+            stopMovement(client);
         }
     }
 
@@ -539,4 +551,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                      }
+    }
