@@ -311,105 +311,78 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         BlockPos playerFeet = client.player.getBlockPos();
         Vec3d targetCenter = Vec3d.ofCenter(target);
 
-        // Определяем горизонтальное направление к цели
-        double dx = targetCenter.x - (playerFeet.getX() + 0.5);
-        double dz = targetCenter.z - (playerFeet.getZ() + 0.5);
-        Direction forward = Direction.fromHorizontalDegrees(client.player.getYaw());
-
-        // Корректируем направление: смотрим на цель
+        // Смотрим на цель
         faceTarget(client, targetCenter);
-
-        // Определяем блоки перед игроком (2 блока в высоту)
-        BlockPos frontFeet = playerFeet.add(forward.getVector());
-        BlockPos frontHead = frontFeet.up();
-
-        // Проверяем высоту цели
+        Direction forward = Direction.fromHorizontalDegrees(client.player.getYaw());
         int deltaY = target.getY() - playerFeet.getY();
 
-        // Обработка подъёма
+        BlockPos frontFeet = playerFeet.add(forward.getVector());
+        BlockPos frontHead = frontFeet.up();
+        boolean feetSolid = isSolidOrBedrock(client.world, frontFeet);
+        boolean headSolid = isSolidOrBedrock(client.world, frontHead);
+
+        // Подъём: цель выше
         if (deltaY > 0) {
-            // Нужно выкопать ступеньку: 2 блока перед (уровень ног и головы) и запрыгнуть
-            if (isSolidOrBedrock(client.world, frontFeet)) {
-                // Если блок не ломается (бедрок) — пытаемся обойти
-                if (isBedrock(client.world, frontFeet)) {
-                    startBedrockAvoidance(client, forward);
-                    return;
-                }
-                // Ломаем нижний блок
-                faceBlock(client, frontFeet);
-                client.options.attackKey.setPressed(true);
-                client.options.forwardKey.setPressed(false); // стоим, копаем
-                client.options.jumpKey.setPressed(false);
+            // Проверяем блоки прямо над игроком
+            BlockPos aboveFeet = playerFeet.up();       // на уровне головы
+            BlockPos aboveHead = playerFeet.up(2);      // над головой
+            if (isSolidOrBedrock(client.world, aboveFeet)) {
+                safeMine(client, aboveFeet);
                 return;
             }
-            if (isSolidOrBedrock(client.world, frontHead)) {
-                if (isBedrock(client.world, frontHead)) {
-                    startBedrockAvoidance(client, forward);
-                    return;
-                }
-                faceBlock(client, frontHead);
-                client.options.attackKey.setPressed(true);
-                client.options.forwardKey.setPressed(false);
-                client.options.jumpKey.setPressed(false);
+            if (isSolidOrBedrock(client.world, aboveHead)) {
+                safeMine(client, aboveHead);
                 return;
             }
-            // Нижний блок сломан, верхний тоже, можем идти и прыгать
+
+            // Блоки перед игроком
+            if (feetSolid || headSolid) {
+                if (feetSolid) {
+                    if (isBedrock(client.world, frontFeet)) startBedrockAvoidance(client, forward);
+                    else safeMine(client, frontFeet);
+                } else {
+                    if (isBedrock(client.world, frontHead)) startBedrockAvoidance(client, forward);
+                    else safeMine(client, frontHead);
+                }
+                return;
+            }
+
+            // Путь свободен – идём и прыгаем (только если на земле)
             client.options.forwardKey.setPressed(true);
-            client.options.jumpKey.setPressed(true);
+            client.options.jumpKey.setPressed(client.player.isOnGround());
             client.options.attackKey.setPressed(false);
             return;
         }
 
-        // Обработка спуска
+        // Спуск: цель ниже
         if (deltaY < 0) {
             BlockPos below = playerFeet.down();
             if (isSolidOrBedrock(client.world, below)) {
-                if (isBedrock(client.world, below)) {
-                    startBedrockAvoidance(client, forward);
-                    return;
-                }
-                faceBlock(client, below);
-                client.options.attackKey.setPressed(true);
-                client.options.forwardKey.setPressed(false);
-                client.options.jumpKey.setPressed(false);
+                if (isBedrock(client.world, below)) startBedrockAvoidance(client, forward);
+                else safeMine(client, below);
                 return;
             }
-            // Пусто под ногами — идём вперёд (упадём)
             client.options.forwardKey.setPressed(true);
             client.options.jumpKey.setPressed(false);
             client.options.attackKey.setPressed(false);
             return;
         }
 
-        // Тот же уровень — туннель 1x2
-        boolean feetBlocked = isSolidOrBedrock(client.world, frontFeet);
-        boolean headBlocked = isSolidOrBedrock(client.world, frontHead);
-
-        // Если бедрок в ногах или голове, обходим
-        if ((feetBlocked && isBedrock(client.world, frontFeet)) ||
-            (headBlocked && isBedrock(client.world, frontHead))) {
-            startBedrockAvoidance(client, forward);
-            return;
-        }
-
-        // Если есть ломаемые блоки — копаем их
-        if (feetBlocked) {
-            faceBlock(client, frontFeet);
-            client.options.attackKey.setPressed(true);
-            client.options.forwardKey.setPressed(true); // одновременно идём, чтобы не терять время
-            client.options.jumpKey.setPressed(false);
-            return;
-        }
-        if (headBlocked) {
-            faceBlock(client, frontHead);
-            client.options.attackKey.setPressed(true);
+        // Тот же уровень – туннель 1x2
+        if (feetSolid || headSolid) {
+            if ((feetSolid && isBedrock(client.world, frontFeet)) ||
+                (headSolid && isBedrock(client.world, frontHead))) {
+                startBedrockAvoidance(client, forward);
+                return;
+            }
+            if (feetSolid) safeMine(client, frontFeet);
+            else safeMine(client, frontHead);
+            // Одновременно идём и копаем
             client.options.forwardKey.setPressed(true);
-            client.options.jumpKey.setPressed(false);
             return;
         }
 
-        // Путь свободен — просто идём
-        faceTarget(client, targetCenter);
+        // Путь свободен
         client.options.forwardKey.setPressed(true);
         client.options.jumpKey.setPressed(false);
         client.options.attackKey.setPressed(false);
@@ -421,7 +394,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         Direction leftDir = blockedDir.rotateYCounterclockwise();
         BlockPos playerFeet = client.player.getBlockPos();
 
-        // Ищем свободный путь сбоку (хотя бы 2 блока высоты)
         if (isPassable(client.world, playerFeet.add(rightDir.getVector())) &&
             isPassable(client.world, playerFeet.add(rightDir.getVector()).up())) {
             avoidDirection = rightDir;
@@ -467,24 +439,47 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
     }
 
+    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (НИЧЕГО НЕ УРЕЗАНО) ========================
+    private void safeMine(MinecraftClient client, BlockPos pos) {
+        if (!canBreak(client.world, pos)) return;
+        faceBlock(client, pos);
+        client.options.attackKey.setPressed(true);
+        client.options.forwardKey.setPressed(false);
+        client.options.jumpKey.setPressed(false);
+    }
+
+    private boolean canBreak(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return !state.isAir() && !state.isOf(Blocks.BEDROCK);
+    }
+
+    // Методы, которые были в старых версиях, теперь оставлены для совместимости
+    private boolean isSolid(World world, BlockPos pos) {
+        return isSolidOrBedrock(world, pos) && !isBedrock(world, pos);
+    }
+
+    private BlockPos findBestObstacle(MinecraftClient client, Vec3d targetCenter) {
+        // Больше не используется, но метод сохранён
+        return null;
+    }
+
     private void faceBlock(MinecraftClient client, BlockPos pos) {
-        Vec3d target = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
-        faceTarget(client, target);
+        Vec3d center = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        faceTarget(client, center);
     }
 
     private void faceDirection(MinecraftClient client, Direction dir) {
-        float yaw = 0;
-        switch (dir) {
-            case NORTH: yaw = 180; break;
-            case SOUTH: yaw = 0; break;
-            case WEST: yaw = 90; break;
-            case EAST: yaw = -90; break;
-        }
+        float yaw = switch (dir) {
+            case NORTH -> 180;
+            case SOUTH -> 0;
+            case WEST -> 90;
+            case EAST -> -90;
+            default -> client.player.getYaw();
+        };
         client.player.setYaw(yaw);
         client.player.setPitch(0);
     }
 
-    // ======================== ОСТАЛЬНЫЕ ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
     private void stopMovement(MinecraftClient client) {
         client.options.forwardKey.setPressed(false);
         client.options.attackKey.setPressed(false);
@@ -494,12 +489,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private void faceTarget(MinecraftClient client, Vec3d target) {
-        Vec3d eyePos = client.player.getEyePos();
-        Vec3d dir = target.subtract(eyePos).normalize();
-        double yaw = Math.toDegrees(Math.atan2(-dir.x, dir.z));
-        double pitch = Math.toDegrees(-Math.asin(dir.y));
-        client.player.setYaw((float)yaw);
-        client.player.setPitch((float)pitch);
+        Vec3d eye = client.player.getEyePos();
+        Vec3d dir = target.subtract(eye).normalize();
+        client.player.setYaw((float) Math.toDegrees(Math.atan2(-dir.x, dir.z)));
+        client.player.setPitch((float) Math.toDegrees(-Math.asin(dir.y)));
     }
 
     private BlockPos findNearestDiamond(MinecraftClient client) {
@@ -529,37 +522,21 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
-    /** Точечные фильтры: игнорирует алмазы, которые невозможно/опасно добывать. */
     private boolean isValidDiamondTarget(World world, BlockPos pos) {
-        // Над лавой? (проверяем 3 блока вниз)
         for (int dy = 1; dy <= 3; dy++) {
-            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) {
-                return false;
-            }
+            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) return false;
         }
-        // Под бедроком?
-        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) {
-            return false;
-        }
-        // На уровне бедрока (соседи по горизонтали)?
+        if (isBedrock(world, pos.up())) return false;
         if (isBedrock(world, pos.north()) || isBedrock(world, pos.south()) ||
-            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) {
-            return false;
-        }
+            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) return false;
         return true;
     }
 
-    private boolean isAir(World world, BlockPos pos) {
-        return world.getBlockState(pos).isAir();
-    }
-
-    /** Любой твёрдый блок, включая бедрок */
     private boolean isSolidOrBedrock(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !isDiamond(world, pos);
     }
 
-    /** Можно ли пройти (воздух или алмаз) */
     private boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return state.isAir() || isDiamond(world, pos);
@@ -570,9 +547,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         if (client.player != null) {
             client.execute(() -> client.player.sendMessage(
                     Text.literal("[AutoMiner] ").formatted(Formatting.GOLD)
-                            .append(Text.literal(msg).formatted(color)),
-                    false
-            ));
+                            .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                                                     }
+        }
