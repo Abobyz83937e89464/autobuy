@@ -16,12 +16,9 @@ import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
-import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.awt.*;
 
 public class ExampleMod implements ModInitializer, ClientModInitializer {
     public static final String MOD_ID = "autominer";
@@ -32,9 +29,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     private boolean active = false;
     private BlockPos target = null;
-    private boolean mining = false;  // true, когда непосредственно копаем алмаз
+    private boolean mining = false;
 
-    // Расстояние, на котором считаем, что дошли до алмаза и можно копать
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
 
@@ -54,7 +50,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
         LOGGER.info("[AutoMiner] Мод успешно инициализирован!");
 
-        // Бинд U
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.autominer.toggle",
                 InputUtil.Type.KEYSYM,
@@ -62,11 +57,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 "key.categories.misc"
         ));
 
-        // Основной тик
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
-            // Переключение по U
             if (toggleKey.wasPressed()) {
                 active = !active;
                 if (active) {
@@ -83,9 +76,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
             if (!active) return;
 
-            // Основная логика
             try {
-                // Если нет цели – ищем ближайший алмаз
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -100,17 +91,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Если уже рядом – добываем алмаз
                 if (dist <= REACH_DISTANCE) {
-                    // Наводимся точно на алмаз
                     faceTarget(client, targetCenter);
-                    // Зажимаем кнопку атаки
                     client.options.attackKey.setPressed(true);
                     mining = true;
 
-                    // Проверяем, не исчез ли алмаз (добыт)
                     if (!isDiamond(client.world, target)) {
-                        // Алмаз добыт
                         client.options.attackKey.setPressed(false);
                         sendMsg("Алмаз добыт! Отключаюсь.", Formatting.GREEN);
                         active = false;
@@ -118,27 +104,21 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         mining = false;
                     }
                 } else {
-                    // Движемся к цели
                     if (mining) {
                         client.options.attackKey.setPressed(false);
                         mining = false;
                     }
-                    // Поворачиваемся к цели
                     faceTarget(client, targetCenter);
-                    // Идём вперёд
                     client.options.forwardKey.setPressed(true);
 
-                    // Проверяем, есть ли перед нами твёрдый блок (не воздух и не сам алмаз)
                     Vec3d lookDir = client.player.getRotationVec(1.0F);
-                    Vec3d hitPos = eyePos.add(lookDir.multiply(0.5, 0.5, 0.5)); // чуть впереди
+                    Vec3d hitPos = eyePos.add(lookDir.multiply(0.5, 0.5, 0.5));
                     BlockPos frontBlock = new BlockPos((int)Math.floor(hitPos.x), (int)Math.floor(hitPos.y), (int)Math.floor(hitPos.z));
                     if (!client.world.getBlockState(frontBlock).isAir() &&
                         !client.world.getBlockState(frontBlock).isOf(Blocks.DIAMOND_ORE) &&
                         !client.world.getBlockState(frontBlock).isOf(Blocks.DEEPSLATE_DIAMOND_ORE)) {
-                        // Копаем блок перед собой
                         client.options.attackKey.setPressed(true);
                     } else {
-                        // Перед нами воздух или сам алмаз – не копаем, просто идём
                         client.options.attackKey.setPressed(false);
                     }
                 }
@@ -151,7 +131,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Рендеринг трассера и обводки
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -167,19 +146,18 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             Tessellator tessellator = Tessellator.getInstance();
             BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR);
 
-            // Линия от глаз до цели (жёлтая)
-            buffer.vertex(eyePos.x - camPos.x, eyePos.y - camPos.y, eyePos.z - camPos.z).color(1.0f, 1.0f, 0.0f, 1.0f);
-            buffer.vertex(targetCenter.x - camPos.x, targetCenter.y - camPos.y, targetCenter.z - camPos.z).color(1.0f, 1.0f, 0.0f, 1.0f);
+            // Линия от глаз до цели
+            buffer.vertex((float)(eyePos.x - camPos.x), (float)(eyePos.y - camPos.y), (float)(eyePos.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
+            buffer.vertex((float)(targetCenter.x - camPos.x), (float)(targetCenter.y - camPos.y), (float)(targetCenter.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
 
-            // Обводка блока цели (белый wireframe)
-            double minX = target.getX() - camPos.x;
-            double minY = target.getY() - camPos.y;
-            double minZ = target.getZ() - camPos.z;
-            double maxX = minX + 1;
-            double maxY = minY + 1;
-            double maxZ = minZ + 1;
+            // Обводка
+            float minX = (float)(target.getX() - camPos.x);
+            float minY = (float)(target.getY() - camPos.y);
+            float minZ = (float)(target.getZ() - camPos.z);
+            float maxX = minX + 1.0f;
+            float maxY = minY + 1.0f;
+            float maxZ = minZ + 1.0f;
 
-            // 12 рёбер куба
             // Нижняя грань
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -189,6 +167,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+
             // Верхняя грань
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -198,7 +177,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
-            // Вертикальные рёбра
+
+            // Вертикали
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
