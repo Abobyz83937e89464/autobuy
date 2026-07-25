@@ -4,84 +4,39 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.*;
 import net.minecraft.client.util.InputUtil;
-import net.minecraft.component.type.MapIdComponent;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.map.MapState;
-import net.minecraft.item.tooltip.TooltipType;
-import net.minecraft.registry.RegistryWrapper;
-import net.minecraft.screen.slot.Slot;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.*;
+import java.awt.*;
 
 public class ExampleMod implements ModInitializer, ClientModInitializer {
-    public static final String MOD_ID = "autobuy";
+    public static final String MOD_ID = "autominer";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static KeyBinding toggleKey;
     private static boolean initialized = false;
 
-    private boolean isActive = false;
-    private long currentBalance = 0;
+    private boolean active = false;
+    private BlockPos target = null;
+    private boolean mining = false;  // true, когда непосредственно копаем алмаз
 
-    private BotState currentState = BotState.IDLE;
-    private int waitTicks = 0;
-
-    enum BotState {
-        IDLE, CHECK_BALANCE, OPEN_AH, SCAN_PAGE, NEXT_PAGE, EVALUATE,
-        PROCESS_TARGET, MARKET_GUI, FIND_AND_BUY, BUY_ITEM, CONFIRM_BUY,
-        SELL_TO_MARKET, SELL_TO_AH
-    }
-
-    private final Map<String, List<Long>> priceSamples = new HashMap<>();
-    private final Map<String, Long> marketPrices = new HashMap<>();
-    private final Map<String, Integer> itemCounts = new HashMap<>();
-
-    private static class Target {
-        String name;
-        long maxPrice;
-        long marketUnitPrice;
-        boolean isMarketItem;
-    }
-    private final List<Target> targets = new ArrayList<>();
-    private int currentTargetIndex = 0;
-    private Target currentTarget = null;
-
-    private int buySlotId = -1;
-    private String buyItemName = "";
-    private long buyPrice = 0;
-
-    private int nextPageSlotId = -1;
-    private boolean huntingMode = false;
-
-    private int marketAttempts = 0;
-    private static final int MAX_MARKET_ATTEMPTS = 2;
-    private int marketGuiWaitTicks = 0;
-
-    private static final int MIN_LOTS_FOR_PURCHASE = 3;
-
-    private static final Set<String> BLACKLIST_KEYWORDS = Set.of(
-        "кожан", "железн", "золот", "каменн", "деревянн", "цепн", "кольчуг",
-        "удочк", "fishing rod", "bow"
-    );
-
-    private static final Set<String> MARKET_KEYWORDS = Set.of(
-        "лазурит", "lapis", "алмаз", "diamond", "изумруд", "emerald",
-        "золото", "gold", "железо", "iron", "медь", "copper",
-        "редстоун", "redstone", "уголь", "coal", "кварц", "quartz",
-        "эндер-кристалл", "ender crystal", "эндер-сундук", "ender chest",
-        "блок", "block", "кристалл", "crystal", "руда", "ore"
-    );
+    // Расстояние, на котором считаем, что дошли до алмаза и можно копать
+    private static final double REACH_DISTANCE = 2.5;
+    private static final int SCAN_RADIUS = 50;
 
     @Override
     public void onInitialize() {
@@ -97,556 +52,218 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         if (initialized) return;
         initialized = true;
 
-        LOGGER.info("[AutoBuy] Мод успешно инициализирован!");
+        LOGGER.info("[AutoMiner] Мод успешно инициализирован!");
 
+        // Бинд U
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autobuy.toggle",
+                "key.autominer.toggle",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_U,
                 "key.categories.misc"
         ));
 
-        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
-            if (!isActive) return;
-            String text = message.getString();
-            if (currentState == BotState.CHECK_BALANCE &&
-                (text.toLowerCase().contains("balance") || text.toLowerCase().contains("баланс"))) {
-                MinecraftClient.getInstance().execute(() -> parseBalance(text));
-            }
-        });
-
+        // Основной тик
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
-            while (toggleKey.wasPressed()) {
-                isActive = !isActive;
-                if (isActive) {
-                    sendMsg("Бот активирован", Formatting.GREEN);
-                    setState(BotState.CHECK_BALANCE);
-                    waitTicks = 0;
+            // Переключение по U
+            if (toggleKey.wasPressed()) {
+                active = !active;
+                if (active) {
+                    sendMsg("Авто-шахтёр активирован", Formatting.GREEN);
+                    target = null;
+                    mining = false;
                 } else {
-                    sendMsg("Бот деактивирован", Formatting.RED);
-                    setState(BotState.IDLE);
-                    waitTicks = 0;
+                    sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
+                    stopMovement(client);
+                    target = null;
+                    mining = false;
                 }
             }
 
-            if (!isActive) return;
+            if (!active) return;
 
-            if (waitTicks > 0) {
-                waitTicks--;
-                return;
+            // Основная логика
+            try {
+                // Если нет цели – ищем ближайший алмаз
+                if (target == null) {
+                    target = findNearestDiamond(client);
+                    if (target == null) {
+                        sendMsg("Алмазы не найдены в радиусе " + SCAN_RADIUS + " блоков", Formatting.YELLOW);
+                        active = false;
+                        return;
+                    }
+                    sendMsg("Найден алмаз: " + target.getX() + ", " + target.getY() + ", " + target.getZ(), Formatting.AQUA);
+                }
+
+                Vec3d eyePos = client.player.getEyePos();
+                Vec3d targetCenter = Vec3d.ofCenter(target);
+                double dist = eyePos.distanceTo(targetCenter);
+
+                // Если уже рядом – добываем алмаз
+                if (dist <= REACH_DISTANCE) {
+                    // Наводимся точно на алмаз
+                    faceTarget(client, targetCenter);
+                    // Зажимаем кнопку атаки
+                    client.options.attackKey.setPressed(true);
+                    mining = true;
+
+                    // Проверяем, не исчез ли алмаз (добыт)
+                    if (!isDiamond(client.world, target)) {
+                        // Алмаз добыт
+                        client.options.attackKey.setPressed(false);
+                        sendMsg("Алмаз добыт! Отключаюсь.", Formatting.GREEN);
+                        active = false;
+                        target = null;
+                        mining = false;
+                    }
+                } else {
+                    // Движемся к цели
+                    if (mining) {
+                        client.options.attackKey.setPressed(false);
+                        mining = false;
+                    }
+                    // Поворачиваемся к цели
+                    faceTarget(client, targetCenter);
+                    // Идём вперёд
+                    client.options.forwardKey.setPressed(true);
+
+                    // Проверяем, есть ли перед нами твёрдый блок (не воздух и не сам алмаз)
+                    Vec3d lookDir = client.player.getRotationVec(1.0F);
+                    Vec3d hitPos = eyePos.add(lookDir.multiply(0.5, 0.5, 0.5)); // чуть впереди
+                    BlockPos frontBlock = new BlockPos((int)Math.floor(hitPos.x), (int)Math.floor(hitPos.y), (int)Math.floor(hitPos.z));
+                    if (!client.world.getBlockState(frontBlock).isAir() &&
+                        !client.world.getBlockState(frontBlock).isOf(Blocks.DIAMOND_ORE) &&
+                        !client.world.getBlockState(frontBlock).isOf(Blocks.DEEPSLATE_DIAMOND_ORE)) {
+                        // Копаем блок перед собой
+                        client.options.attackKey.setPressed(true);
+                    } else {
+                        // Перед нами воздух или сам алмаз – не копаем, просто идём
+                        client.options.attackKey.setPressed(false);
+                    }
+                }
+            } catch (Exception e) {
+                sendMsg("Ошибка: " + e.getMessage(), Formatting.RED);
+                active = false;
+                stopMovement(client);
+                target = null;
+                mining = false;
             }
+        });
 
-            switch (currentState) {
-                case IDLE:
-                    break;
+        // Рендеринг трассера и обводки
+        WorldRenderEvents.LAST.register(context -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.player == null || !active || target == null) return;
 
-                case CHECK_BALANCE:
-                    client.getNetworkHandler().sendCommand("balance");
-                    setWait(60);
-                    break;
+            Vec3d eyePos = client.player.getEyePos();
+            Vec3d targetCenter = Vec3d.ofCenter(target);
+            Vec3d camPos = context.camera().getPos();
 
-                case OPEN_AH:
-                    priceSamples.clear();
-                    marketPrices.clear();
-                    itemCounts.clear();
-                    targets.clear();
-                    currentTargetIndex = 0;
-                    currentTarget = null;
-                    huntingMode = false;
+            MatrixStack matrices = context.matrixStack();
+            matrices.push();
+            matrices.translate(-camPos.x, -camPos.y, -camPos.z);
 
-                    client.getNetworkHandler().sendCommand("ah");
-                    setState(BotState.SCAN_PAGE);
-                    setWait(15);
-                    break;
+            Tessellator tessellator = Tessellator.getInstance();
+            BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR);
 
-                case SCAN_PAGE:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        if (huntingMode) {
-                            boolean found = searchForCurrentTarget(screen);
-                            if (found) {
-                                setState(BotState.BUY_ITEM);
-                            } else {
-                                nextPageSlotId = findNextPageSlot(screen);
-                                if (nextPageSlotId != -1) {
-                                    setState(BotState.NEXT_PAGE);
-                                } else {
-                                    advanceTarget();
-                                }
-                            }
-                        } else {
-                            scanPageForStats(screen);
-                            nextPageSlotId = findNextPageSlot(screen);
-                            if (nextPageSlotId != -1) {
-                                setState(BotState.NEXT_PAGE);
-                            } else {
-                                setState(BotState.EVALUATE);
-                            }
-                        }
-                    } else {
-                        sendMsg("Аукцион не открыт, пробую снова /ah", Formatting.RED);
-                        setState(BotState.OPEN_AH);
-                        setWait(15);
-                    }
-                    break;
+            // Линия от глаз до цели (жёлтая)
+            buffer.vertex(eyePos.x - camPos.x, eyePos.y - camPos.y, eyePos.z - camPos.z).color(1.0f, 1.0f, 0.0f, 1.0f);
+            buffer.vertex(targetCenter.x - camPos.x, targetCenter.y - camPos.y, targetCenter.z - camPos.z).color(1.0f, 1.0f, 0.0f, 1.0f);
 
-                case NEXT_PAGE:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        if (nextPageSlotId >= 0 && nextPageSlotId < screen.getScreenHandler().slots.size()) {
-                            client.interactionManager.clickSlot(
-                                screen.getScreenHandler().syncId,
-                                nextPageSlotId,
-                                0,
-                                net.minecraft.screen.slot.SlotActionType.PICKUP,
-                                client.player
-                            );
-                            setState(BotState.SCAN_PAGE);
-                            setWait(4);
-                        } else {
-                            client.setScreen(null);
-                            setState(BotState.OPEN_AH);
-                        }
-                    } else {
-                        setState(BotState.OPEN_AH);
-                    }
-                    break;
+            // Обводка блока цели (белый wireframe)
+            double minX = target.getX() - camPos.x;
+            double minY = target.getY() - camPos.y;
+            double minZ = target.getZ() - camPos.z;
+            double maxX = minX + 1;
+            double maxY = minY + 1;
+            double maxZ = minZ + 1;
 
-                case EVALUATE:
-                    evaluateTargets();
-                    if (!targets.isEmpty()) {
-                        sendMsg("Найдено выгодных лотов: " + targets.size(), Formatting.AQUA);
-                        for (Target t : targets) {
-                            sendMsg(" - " + t.name + " цена " + t.maxPrice, Formatting.GRAY);
-                        }
-                        currentTargetIndex = 0;
-                        client.setScreen(null);
-                        setState(BotState.PROCESS_TARGET);
-                        setWait(10);
-                    } else {
-                        sendMsg("Нет целей, начинаю новый проход.", Formatting.GRAY);
-                        client.setScreen(null);
-                        setState(BotState.OPEN_AH);
-                        setWait(20);
-                    }
-                    break;
+            // 12 рёбер куба
+            // Нижняя грань
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            // Верхняя грань
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            // Вертикальные рёбра
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
 
-                case PROCESS_TARGET:
-                    if (currentTargetIndex >= targets.size()) {
-                        sendMsg("Все цели обработаны, открываю аукцион заново.", Formatting.GRAY);
-                        setState(BotState.OPEN_AH);
-                        setWait(10);
-                    } else {
-                        currentTarget = targets.get(currentTargetIndex);
-                        if (currentTarget.isMarketItem) {
-                            marketAttempts = 0;
-                            client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
-                            setState(BotState.MARKET_GUI);
-                            marketGuiWaitTicks = 10;
-                            setWait(marketGuiWaitTicks);
-                        } else {
-                            huntingMode = true;
-                            client.getNetworkHandler().sendCommand("ah");
-                            setState(BotState.FIND_AND_BUY);
-                            setWait(15);
-                        }
-                    }
-                    break;
+            BufferRenderer.drawWithGlobalProgram(buffer.end());
 
-                case MARKET_GUI:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        long unitPrice = scanMarketGui(screen);
-                        if (unitPrice > 0) {
-                            currentTarget.marketUnitPrice = unitPrice;
-                            sendMsg("Маркет цена за шт: " + unitPrice, Formatting.AQUA);
-                            if (unitPrice > currentTarget.maxPrice) {
-                                sendMsg("Маркет дороже аукциона, покупаем!", Formatting.GREEN);
-                                client.setScreen(null);
-                                huntingMode = true;
-                                client.getNetworkHandler().sendCommand("ah");
-                                setState(BotState.FIND_AND_BUY);
-                                setWait(15);
-                            } else {
-                                sendMsg("Маркет цена не выше аукциона, пропускаем.", Formatting.RED);
-                                client.setScreen(null);
-                                advanceTarget();
-                            }
-                        } else {
-                            sendMsg("Не удалось извлечь цену из GUI маркета.", Formatting.RED);
-                            client.setScreen(null);
-                            advanceTarget();
-                        }
-                    } else {
-                        if (marketGuiWaitTicks <= 0) {
-                            if (marketAttempts < MAX_MARKET_ATTEMPTS - 1) {
-                                marketAttempts++;
-                                sendMsg("Повторная попытка /market search для " + currentTarget.name, Formatting.YELLOW);
-                                client.getNetworkHandler().sendCommand("market search " + currentTarget.name);
-                                marketGuiWaitTicks = 10;
-                                setWait(marketGuiWaitTicks);
-                            } else {
-                                sendMsg("Не удалось открыть GUI маркета, пропускаю.", Formatting.RED);
-                                advanceTarget();
-                            }
-                        } else {
-                            marketGuiWaitTicks -= waitTicks;
-                            setWait(1);
-                        }
-                    }
-                    break;
-
-                case FIND_AND_BUY:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        boolean found = searchForCurrentTarget(screen);
-                        if (found) {
-                            setState(BotState.BUY_ITEM);
-                        } else {
-                            nextPageSlotId = findNextPageSlot(screen);
-                            if (nextPageSlotId != -1) {
-                                client.interactionManager.clickSlot(
-                                    screen.getScreenHandler().syncId,
-                                    nextPageSlotId,
-                                    0,
-                                    net.minecraft.screen.slot.SlotActionType.PICKUP,
-                                    client.player
-                                );
-                                setWait(4);
-                            } else {
-                                sendMsg("Цель не найдена на ауке: " + currentTarget.name, Formatting.RED);
-                                advanceTarget();
-                            }
-                        }
-                    } else {
-                        sendMsg("Аукцион не открыт для цели, пробую /ah", Formatting.RED);
-                        client.getNetworkHandler().sendCommand("ah");
-                        setWait(15);
-                    }
-                    break;
-
-                case BUY_ITEM:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        if (buySlotId >= 0 && buySlotId < screen.getScreenHandler().slots.size()) {
-                            client.interactionManager.clickSlot(
-                                    screen.getScreenHandler().syncId,
-                                    buySlotId,
-                                    0,
-                                    net.minecraft.screen.slot.SlotActionType.PICKUP,
-                                    client.player
-                            );
-                            sendMsg("Первый клик по лоту: " + buyItemName, Formatting.GREEN);
-                        }
-                        setState(BotState.CONFIRM_BUY);
-                        setWait(8); // ждём появления кнопки "Купить"
-                    } else {
-                        advanceTarget();
-                    }
-                    break;
-
-                case CONFIRM_BUY:
-                    if (client.currentScreen instanceof HandledScreen<?> screen) {
-                        int confirmSlot = findBuySlot(screen);
-                        if (confirmSlot != -1) {
-                            client.interactionManager.clickSlot(
-                                    screen.getScreenHandler().syncId,
-                                    confirmSlot,
-                                    0,
-                                    net.minecraft.screen.slot.SlotActionType.PICKUP,
-                                    client.player
-                            );
-                            sendMsg("Подтверждение покупки (слот " + confirmSlot + ")", Formatting.AQUA);
-                        } else {
-                            sendMsg("Слот 'Купить' не найден, продолжаем без подтверждения.", Formatting.RED);
-                        }
-                        client.setScreen(null);
-                    }
-                    if (currentTarget != null && currentTarget.isMarketItem) {
-                        setState(BotState.SELL_TO_MARKET);
-                    } else {
-                        setState(BotState.SELL_TO_AH);
-                    }
-                    setWait(10);
-                    break;
-
-                case SELL_TO_MARKET:
-                    if (currentTarget != null && currentTarget.marketUnitPrice > 0) {
-                        client.getNetworkHandler().sendCommand("market sell " + currentTarget.marketUnitPrice);
-                        sendMsg("Продаю на маркете " + currentTarget.name + " по " + currentTarget.marketUnitPrice, Formatting.GREEN);
-                    }
-                    advanceTarget();
-                    break;
-
-                case SELL_TO_AH:
-                    long sellPrice;
-                    if (buyPrice < 10_000) {
-                        sellPrice = (long)(buyPrice * 1.7);
-                    } else if (buyPrice < 50_000) {
-                        sellPrice = (long)(buyPrice * 1.33);
-                    } else if (buyPrice < 150_000) {
-                        sellPrice = (long)(buyPrice * 1.2);
-                    } else {
-                        sellPrice = (long)(buyPrice * 1.15);
-                    }
-                    if (sellPrice <= 0) sellPrice = 50000;
-                    client.getNetworkHandler().sendCommand("ah sell " + sellPrice);
-                    sendMsg("Выставляю " + buyItemName + " за " + sellPrice, Formatting.GREEN);
-                    advanceTarget();
-                    break;
-            }
+            matrices.pop();
         });
     }
 
-    // ===================== Обработчики чата =====================
-    private void parseBalance(String text) {
-        try {
-            String nums = text.replaceAll("[^0-9]", "");
-            if (!nums.isEmpty()) {
-                currentBalance = Long.parseLong(nums);
-                sendMsg("Баланс обновлен: " + currentBalance, Formatting.YELLOW);
-                if (currentBalance <= 0) {
-                    sendMsg("Недостаточно средств. Бот остановлен.", Formatting.RED);
-                    isActive = false;
-                    setState(BotState.IDLE);
-                } else {
-                    setState(BotState.OPEN_AH);
-                    setWait(10);
-                }
-            }
-        } catch (Exception e) {
-            sendMsg("Ошибка парсинга баланса.", Formatting.RED);
-        }
+    private void stopMovement(MinecraftClient client) {
+        client.options.forwardKey.setPressed(false);
+        client.options.attackKey.setPressed(false);
     }
 
-    // ===================== Управление целями =====================
-    private void advanceTarget() {
-        currentTargetIndex++;
-        buySlotId = -1;
-        buyItemName = "";
-        buyPrice = 0;
-        currentTarget = null;
-        huntingMode = false;
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.currentScreen != null) client.setScreen(null);
-        setState(BotState.PROCESS_TARGET);
-        setWait(5);
+    private void faceTarget(MinecraftClient client, Vec3d target) {
+        Vec3d eyePos = client.player.getEyePos();
+        Vec3d dir = target.subtract(eyePos).normalize();
+        double yaw = Math.toDegrees(Math.atan2(-dir.x, dir.z));
+        double pitch = Math.toDegrees(-Math.asin(dir.y));
+        client.player.setYaw((float)yaw);
+        client.player.setPitch((float)pitch);
     }
 
-    // ===================== Сканирование и оценка =====================
-    private void scanPageForStats(HandledScreen<?> screen) {
-        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
-            Slot slot = screen.getScreenHandler().slots.get(i);
-            if (!slot.hasStack()) continue;
-            ItemStack stack = slot.getStack();
-            String name = stack.getName().getString();
-            long price = extractPrice(stack);
-            if (price <= 0 || !isAllowedToBuy(name)) continue;
+    private BlockPos findNearestDiamond(MinecraftClient client) {
+        World world = client.world;
+        BlockPos playerPos = client.player.getBlockPos();
+        BlockPos nearest = null;
+        double nearestDist = Double.MAX_VALUE;
 
-            priceSamples.computeIfAbsent(name, k -> new ArrayList<>()).add(price);
-        }
-
-        marketPrices.clear();
-        itemCounts.clear();
-        for (var entry : priceSamples.entrySet()) {
-            String name = entry.getKey();
-            List<Long> prices = entry.getValue();
-            itemCounts.put(name, prices.size());
-            long avg = (long) prices.stream().mapToLong(Long::longValue).average().orElse(0);
-            marketPrices.put(name, avg);
-        }
-    }
-
-    private long scanMarketGui(HandledScreen<?> screen) {
-        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
-            Slot slot = screen.getScreenHandler().slots.get(i);
-            if (!slot.hasStack()) continue;
-            ItemStack stack = slot.getStack();
-            long price = extractMarketUnitPrice(stack);
-            if (price > 0) return price;
-        }
-        return -1;
-    }
-
-    private long extractMarketUnitPrice(ItemStack stack) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return -1;
-        List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
-            public boolean isAdvanced() { return false; }
-            public boolean isCreative() { return false; }
-            public MapState getMapState(MapIdComponent id) { return null; }
-            public float getUpdateTickRate() { return 20.0F; }
-            public RegistryWrapper.WrapperLookup getRegistryLookup() {
-                return MinecraftClient.getInstance().player.getWorld().getRegistryManager();
-            }
-        }, client.player, TooltipType.Default.BASIC);
-        for (Text line : lore) {
-            String text = line.getString().toLowerCase();
-            if (text.contains("минимальная цена") ||
-                text.contains("цена за шт") ||
-                text.contains("unit price")) {
-                String nums = line.getString().replaceAll("[^0-9]", "");
-                if (!nums.isEmpty()) {
-                    try {
-                        return Long.parseLong(nums);
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
-        }
-        return -1;
-    }
-
-    private void evaluateTargets() {
-        targets.clear();
-
-        for (var entry : marketPrices.entrySet()) {
-            String name = entry.getKey();
-            long marketAvg = entry.getValue();
-            int count = itemCounts.getOrDefault(name, 0);
-
-            if (!isAllowedToBuy(name)) continue;
-
-            boolean isMarketItem = isMarketItem(name);
-            boolean isTotem = name.toLowerCase().contains("тотем") || name.toLowerCase().contains("totem");
-
-            List<Long> prices = priceSamples.get(name);
-            if (prices == null) continue;
-
-            for (long auctionPrice : prices) {
-                if (auctionPrice > currentBalance) continue;
-
-                if (isTotem) {
-                    if (auctionPrice >= 50000 && auctionPrice <= 100000) {
-                        Target t = new Target();
-                        t.name = name;
-                        t.maxPrice = auctionPrice;
-                        t.isMarketItem = false;
-                        targets.add(t);
-                        break;
-                    }
-                } else if (count >= MIN_LOTS_FOR_PURCHASE) {
-                    double discount = 1.0 - (double) auctionPrice / marketAvg;
-                    if (discount >= 0.25) {
-                        Target t = new Target();
-                        t.name = name;
-                        t.maxPrice = auctionPrice;
-                        t.isMarketItem = isMarketItem;
-                        targets.add(t);
-                        break;
+        for (int x = -SCAN_RADIUS; x <= SCAN_RADIUS; x++) {
+            for (int y = -SCAN_RADIUS; y <= SCAN_RADIUS; y++) {
+                for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
+                    BlockPos pos = playerPos.add(x, y, z);
+                    if (isDiamond(world, pos)) {
+                        double dist = playerPos.getSquaredDistance(pos);
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearest = pos;
+                        }
                     }
                 }
             }
         }
-
-        targets.sort((a, b) -> {
-            if (a.isMarketItem != b.isMarketItem) return a.isMarketItem ? -1 : 1;
-            double discA = 1.0 - (double)a.maxPrice / marketPrices.getOrDefault(a.name, a.maxPrice);
-            double discB = 1.0 - (double)b.maxPrice / marketPrices.getOrDefault(b.name, b.maxPrice);
-            return Double.compare(discB, discA);
-        });
+        return nearest;
     }
 
-    private boolean searchForCurrentTarget(HandledScreen<?> screen) {
-        if (currentTarget == null) return false;
-        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
-            Slot slot = screen.getScreenHandler().slots.get(i);
-            if (!slot.hasStack()) continue;
-            ItemStack stack = slot.getStack();
-            if (stack.getName().getString().equals(currentTarget.name)) {
-                long price = extractPrice(stack);
-                if (price > 0 && price <= currentTarget.maxPrice && price <= currentBalance) {
-                    buySlotId = i;
-                    buyItemName = currentTarget.name;
-                    buyPrice = price;
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean isAllowedToBuy(String name) {
-        String lower = name.toLowerCase();
-        for (String kw : BLACKLIST_KEYWORDS) {
-            if (lower.contains(kw)) return false;
-        }
-        return true;
-    }
-
-    private boolean isMarketItem(String name) {
-        String lower = name.toLowerCase();
-        for (String kw : MARKET_KEYWORDS) {
-            if (lower.contains(kw)) return true;
-        }
-        return false;
-    }
-
-    private int findNextPageSlot(HandledScreen<?> screen) {
-        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
-            Slot slot = screen.getScreenHandler().slots.get(i);
-            if (!slot.hasStack()) continue;
-            String name = slot.getStack().getName().getString().toLowerCase();
-            if (name.contains("next") || name.contains("далее") || name.contains("следующая")) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * Ищет слот с предметом-кнопкой "Купить" (зелёное стекло).
-     */
-    private int findBuySlot(HandledScreen<?> screen) {
-        for (int i = 0; i < screen.getScreenHandler().slots.size(); i++) {
-            Slot slot = screen.getScreenHandler().slots.get(i);
-            if (!slot.hasStack()) continue;
-            String name = slot.getStack().getName().getString().toLowerCase();
-            if (name.contains("купить") || name.contains("buy")) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private long extractPrice(ItemStack stack) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return -1;
-        List<Text> lore = stack.getTooltip(new Item.TooltipContext() {
-            public boolean isAdvanced() { return false; }
-            public boolean isCreative() { return false; }
-            public MapState getMapState(MapIdComponent id) { return null; }
-            public float getUpdateTickRate() { return 20.0F; }
-            public RegistryWrapper.WrapperLookup getRegistryLookup() {
-                return MinecraftClient.getInstance().player.getWorld().getRegistryManager();
-            }
-        }, client.player, TooltipType.Default.BASIC);
-        for (Text line : lore) {
-            String text = line.getString().toLowerCase();
-            if (text.contains("цена:") || text.contains("price:")) {
-                String nums = text.replaceAll("[^0-9]", "");
-                if (!nums.isEmpty()) {
-                    try {
-                        return Long.parseLong(nums);
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
-        }
-        return -1;
-    }
-
-    private void setState(BotState state) {
-        this.currentState = state;
-    }
-
-    private void setWait(int ticks) {
-        this.waitTicks = Math.max(1, ticks + (int)(Math.random() * 3));
+    private boolean isDiamond(World world, BlockPos pos) {
+        return world.getBlockState(pos).isOf(Blocks.DIAMOND_ORE) ||
+               world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.execute(() -> client.player.sendMessage(
-                    Text.literal("[AutoBuy] ").formatted(Formatting.GOLD)
+                    Text.literal("[AutoMiner] ").formatted(Formatting.GOLD)
                             .append(Text.literal(msg).formatted(color)),
                     false
             ));
         }
     }
-                                }
+}
