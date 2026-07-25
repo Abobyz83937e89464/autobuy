@@ -93,7 +93,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Проверка на ловушку
+                // Проверка на ловушку каждые 2 секунды
                 if (client.player.age % 40 == 0 && isTrapped(client)) {
                     startEscape(client);
                     return;
@@ -118,7 +118,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Поиск алмаза (с игнорированием опасных)
+                // Поиск алмаза
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -149,7 +149,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         pickupTicks = 20;
                     }
                 } else {
-                    // Навигация
                     BlockPos playerFeet = client.player.getBlockPos();
                     int deltaY = target.getY() - playerFeet.getY();
 
@@ -193,38 +192,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         }
                     }
 
-                    // Горизонтальное движение
+                    // Горизонтальное движение с улучшенным обнаружением препятствий
                     BlockPos obstacle = findBestObstacle(client, targetCenter);
                     if (obstacle != null) {
-                        Vec3d obstacleCenter = Vec3d.ofCenter(obstacle);
-                        double distToObstacle = eyePos.distanceTo(obstacleCenter);
-
-                        if (distToObstacle > REACH_DISTANCE) {
-                            faceTarget(client, obstacleCenter);
-                            client.options.forwardKey.setPressed(true);
-                            client.options.attackKey.setPressed(false);
-                            client.options.jumpKey.setPressed(false);
-                        } else {
-                            Direction dir = Direction.fromHorizontalDegrees((double) client.player.getYaw());
-                            BlockPos frontFeet = playerFeet.add(dir.getVector());
-                            BlockPos frontHead = frontFeet.up();
-
-                            boolean feetSolid = isSolid(client.world, frontFeet);
-                            boolean headSolid = isSolid(client.world, frontHead);
-
-                            if (feetSolid && !headSolid) {
-                                if (isAir(client.world, frontFeet.up(2)) && canBreak(client.world, frontFeet)) {
-                                    client.options.jumpKey.setPressed(true);
-                                    client.options.forwardKey.setPressed(true);
-                                    client.options.attackKey.setPressed(false);
-                                } else {
-                                    safeMine(client, frontFeet);
-                                }
-                            } else {
-                                safeMine(client, obstacle);
-                            }
-                        }
+                        // Препятствие найдено, ломаем его (бот повернётся к нему автоматически в safeMine)
+                        // Если препятствие нельзя сломать (бедрок), safeMine ничего не делает – тогда бот будет стоять.
+                        // Чтобы не застревать, можно добавить обход, но пока оставим.
+                        safeMine(client, obstacle);
                     } else {
+                        // Путь свободен – идём прямо к цели
                         faceTarget(client, targetCenter);
                         client.options.forwardKey.setPressed(true);
                         client.options.attackKey.setPressed(false);
@@ -239,7 +215,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Рендеринг
+        // Рендеринг трассера и обводки (без изменений)
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -390,6 +366,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             client.options.forwardKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
         } else {
+            // Блок нельзя сломать (бедрок). Стоим на месте, возможно, нужно обходить.
+            // Пока ничего не делаем, чтобы не было ненужных движений.
             client.options.attackKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
@@ -461,24 +439,42 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return !state.isAir() && !state.isOf(Blocks.BEDROCK);
     }
 
+    /**
+     * Ищет ближайшее препятствие на пути к цели с учётом боковых блоков (ширина игрока).
+     * Возвращает позицию препятствия или null, если путь свободен.
+     */
     private BlockPos findBestObstacle(MinecraftClient client, Vec3d targetCenter) {
         Vec3d eyePos = client.player.getEyePos();
         Vec3d dir = targetCenter.subtract(eyePos).normalize();
         double maxDist = eyePos.distanceTo(targetCenter) - 0.5;
         double step = 0.3;
+        // Вектор вправо для проверки боковых точек
+        Vec3d right = dir.crossProduct(new Vec3d(0, 1, 0)).normalize();
+        double halfWidth = 0.3; // половина ширины игрока
+
         Vec3d currentPos = eyePos;
-        BlockPos lastBlock = null;
+        BlockPos lastHead = null;
 
         for (double d = 0; d < maxDist; d += step) {
             currentPos = eyePos.add(dir.multiply(d));
-            BlockPos headPos = new BlockPos((int)Math.floor(currentPos.x), (int)Math.floor(currentPos.y), (int)Math.floor(currentPos.z));
-            BlockPos feetPos = headPos.down();
+            // Проверяем три точки на каждом уровне: центр, влево, вправо
+            Vec3d[] offsets = {
+                currentPos,
+                currentPos.add(right.multiply(halfWidth)),
+                currentPos.add(right.multiply(-halfWidth))
+            };
 
-            if (!headPos.equals(lastBlock)) {
-                lastBlock = headPos;
-                if (isSolid(client.world, headPos)) return headPos;
-                if (isSolid(client.world, feetPos)) return feetPos;
+            for (Vec3d point : offsets) {
+                BlockPos headPos = new BlockPos((int)Math.floor(point.x), (int)Math.floor(point.y), (int)Math.floor(point.z));
+                BlockPos feetPos = headPos.down();
+
+                // Проверяем голову и ноги
+                if (!headPos.equals(lastHead)) { // небольшая оптимизация
+                    if (isSolid(client.world, headPos)) return headPos;
+                    if (isSolid(client.world, feetPos)) return feetPos;
+                }
             }
+            lastHead = new BlockPos((int)Math.floor(currentPos.x), (int)Math.floor(currentPos.y), (int)Math.floor(currentPos.z));
         }
         return null;
     }
@@ -493,4 +489,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-    }
+}
