@@ -152,7 +152,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     if (!isDiamond(client.world, target)) {
                         client.options.attackKey.setPressed(false);
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
-                        pickupTicks = 20; // ждём, чтобы подобрать дроп
+                        pickupTicks = 20;
                     }
                     return;
                 }
@@ -286,7 +286,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ПРЯМОЛИНЕЙНОЕ ДВИЖЕНИЕ (ИСПРАВЛЕНО: копаем над головой) ========================
+    // ======================== ПРЯМОЛИНЕЙНОЕ ДВИЖЕНИЕ (исправлено копание над головой без вертелки) ========================
     private void navigateStraight(MinecraftClient client) {
         BlockPos playerFeet = client.player.getBlockPos();
         Vec3d targetCenter = Vec3d.ofCenter(target);
@@ -296,23 +296,23 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
         BlockPos frontFeet = playerFeet.add(forward.getVector());
         BlockPos frontHead = frontFeet.up();
-        BlockPos frontAbove = frontFeet.up(2);  // над головой впереди
+        BlockPos frontAbove = frontFeet.up(2);
 
         // --- Подъём (цель выше) ---
         if (deltaY > 0) {
-            // 1. Убираем блоки НАД ГОЛОВОЙ НА МЕСТЕ (чтобы было куда прыгнуть)
-            BlockPos aboveFeet = playerFeet.up();   // блок прямо над игроком
-            BlockPos aboveHead = playerFeet.up(2);  // выше
+            // 1. Блоки над головой (на месте). Копаем их, не дёргая камерой по горизонтали.
+            BlockPos aboveFeet = playerFeet.up();
+            BlockPos aboveHead = playerFeet.up(2);
             if (isSolidOrBedrock(client.world, aboveFeet)) {
-                safeMine(client, aboveFeet);
+                safeMineVertical(client, aboveFeet);
                 return;
             }
             if (isSolidOrBedrock(client.world, aboveHead)) {
-                safeMine(client, aboveHead);
+                safeMineVertical(client, aboveHead);
                 return;
             }
 
-            // 2. Убираем препятствия впереди: сначала верхний, потом средний, потом нижний
+            // 2. Препятствия впереди
             if (isSolidOrBedrock(client.world, frontAbove)) {
                 if (isBedrock(client.world, frontAbove)) { startBedrockAvoidance(client, forward); return; }
                 faceBlock(client, frontAbove);
@@ -330,7 +330,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 return;
             }
 
-            // 3. Если перед ногами есть твёрдый блок – используем как ступеньку, прыгаем
+            // 3. Ступенька или просто вперёд
             if (isSolidOrBedrock(client.world, frontFeet)) {
                 if (isBedrock(client.world, frontFeet)) { startBedrockAvoidance(client, forward); return; }
                 client.options.forwardKey.setPressed(true);
@@ -338,7 +338,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 client.options.attackKey.setPressed(false);
                 return;
             } else {
-                // Нет ступеньки – просто идём вперёд
                 client.options.forwardKey.setPressed(true);
                 client.options.jumpKey.setPressed(false);
                 client.options.attackKey.setPressed(false);
@@ -351,7 +350,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             BlockPos below = playerFeet.down();
             if (isSolidOrBedrock(client.world, below)) {
                 if (isBedrock(client.world, below)) { startBedrockAvoidance(client, forward); return; }
-                safeMine(client, below);
+                safeMineVertical(client, below); // копаем вниз, камера смотрит туда же
                 return;
             }
             client.options.forwardKey.setPressed(true);
@@ -391,7 +390,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.options.attackKey.setPressed(false);
     }
 
-    // ======================== ОБХОД БЕДРОКА (исправлено зацикливание) ========================
+    // ======================== ОБХОД БЕДРОКА (с защитой от зацикливания) ========================
     private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir) {
         Direction rightDir = blockedDir.rotateYClockwise();
         Direction leftDir = blockedDir.rotateYCounterclockwise();
@@ -403,10 +402,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                    isPassable(client.world, playerFeet.add(leftDir.getVector()).up())) {
             avoidDirection = leftDir;
         } else {
-            // Невозможно обойти – сбрасываем обход и цель, чтобы не зациклиться
             avoidingBedrock = false;
             stopMovement(client);
-            target = null; // ищем другой алмаз
+            target = null;
             sendMsg("Нет пути для обхода бедрока, ищу другой алмаз.", Formatting.RED);
             return;
         }
@@ -453,6 +451,31 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.options.jumpKey.setPressed(false);
     }
 
+    /**
+     * Копает блок, который находится прямо над/под игроком (вертикально), не меняя горизонтальный угол,
+     * чтобы избежать бешеного вращения.
+     */
+    private void safeMineVertical(MinecraftClient client, BlockPos pos) {
+        if (!canBreak(client.world, pos)) return;
+        // Направляем взгляд вверх или вниз, сохраняя текущий yaw
+        Vec3d eyePos = client.player.getEyePos();
+        Vec3d target = Vec3d.ofCenter(pos);
+        Vec3d dir = target.subtract(eyePos).normalize();
+        // Если горизонтальное расстояние очень мало, оставляем yaw неизменным
+        double horizontalDist = Math.sqrt(dir.x * dir.x + dir.z * dir.z);
+        if (horizontalDist < 0.1) {
+            // Только меняем pitch
+            client.player.setPitch((float) Math.toDegrees(-Math.asin(dir.y)));
+            // yaw не трогаем
+        } else {
+            // Иначе обычный поворот
+            faceTarget(client, target);
+        }
+        client.options.attackKey.setPressed(true);
+        client.options.forwardKey.setPressed(false);
+        client.options.jumpKey.setPressed(false);
+    }
+
     private boolean canBreak(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !state.isOf(Blocks.BEDROCK);
@@ -467,7 +490,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private void faceBlock(MinecraftClient client, BlockPos pos) {
-        Vec3d center = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Vec3d center = Vec3d.ofCenter(pos);
         faceTarget(client, center);
     }
 
@@ -551,4 +574,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-    }
+            }
