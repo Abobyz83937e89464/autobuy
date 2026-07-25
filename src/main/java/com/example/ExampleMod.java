@@ -90,6 +90,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         client.options.forwardKey.setPressed(false);
                     }
                     client.options.attackKey.setPressed(false);
+                    client.options.jumpKey.setPressed(false);
                     if (pickupTicks == 0) {
                         target = null;
                     }
@@ -111,7 +112,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 double dist = eyePos.distanceTo(targetCenter);
 
                 if (dist <= REACH_DISTANCE) {
-                    // Добываем
+                    // Добываем алмаз
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(true);
                     client.options.forwardKey.setPressed(false);
@@ -126,31 +127,39 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     BlockPos playerFeet = client.player.getBlockPos();
                     int deltaY = target.getY() - playerFeet.getY();
 
-                    // Подъём: алмаз выше нас
+                    // Подъём: алмаз выше
                     if (deltaY > 0) {
                         Direction dir = Direction.fromHorizontalDegrees((double) client.player.getYaw());
-                        BlockPos frontHead = playerFeet.add(dir.getVector()).up();   // блок на уровне головы
-                        BlockPos frontAbove = frontHead.up();                        // блок над головой
+                        BlockPos frontFeet = playerFeet.add(dir.getVector());
+                        BlockPos frontHead = frontFeet.up();
+                        BlockPos frontAbove = frontHead.up();
 
-                        boolean headSolid = !client.world.getBlockState(frontHead).isAir() && !isDiamond(client.world, frontHead);
-                        boolean aboveSolid = !client.world.getBlockState(frontAbove).isAir() && !isDiamond(client.world, frontAbove);
+                        boolean feetSolid = !isAirOrDiamondOrBedrock(client.world, frontFeet);
+                        boolean headSolid = !isAirOrDiamondOrBedrock(client.world, frontHead);
+                        boolean aboveSolid = !isAirOrDiamondOrBedrock(client.world, frontAbove);
 
-                        // Приоритет: ломаем верхний блок, затем средний
                         if (aboveSolid) {
+                            // Ломаем самый верхний блок
                             faceTarget(client, Vec3d.ofCenter(frontAbove));
                             client.options.attackKey.setPressed(true);
                             client.options.forwardKey.setPressed(false);
                             client.options.jumpKey.setPressed(false);
                         } else if (headSolid) {
+                            // Ломаем блок на уровне головы
                             faceTarget(client, Vec3d.ofCenter(frontHead));
                             client.options.attackKey.setPressed(true);
                             client.options.forwardKey.setPressed(false);
                             client.options.jumpKey.setPressed(false);
-                        } else {
-                            // Проход свободен, идём вперёд (персонаж начнёт подниматься по образующимся ступенькам)
+                        } else if (feetSolid) {
+                            // Можно запрыгнуть на ступеньку
                             client.options.forwardKey.setPressed(true);
+                            client.options.jumpKey.setPressed(true);
                             client.options.attackKey.setPressed(false);
+                        } else {
+                            // Путь свободен, идём вперёд
+                            client.options.forwardKey.setPressed(true);
                             client.options.jumpKey.setPressed(false);
+                            client.options.attackKey.setPressed(false);
                         }
                         return;
                     }
@@ -158,7 +167,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     // Спуск: алмаз ниже
                     if (deltaY < 0) {
                         BlockPos below = playerFeet.down();
-                        if (!client.world.getBlockState(below).isAir() && !isDiamond(client.world, below)) {
+                        if (!isAirOrDiamondOrBedrock(client.world, below)) {
                             faceTarget(client, Vec3d.ofCenter(below));
                             client.options.attackKey.setPressed(true);
                             client.options.forwardKey.setPressed(false);
@@ -179,13 +188,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             client.options.attackKey.setPressed(false);
                             client.options.jumpKey.setPressed(false);
                         } else {
-                            // Автоджамп или ломаем
                             Direction dir = Direction.fromHorizontalDegrees((double) client.player.getYaw());
                             BlockPos frontFeet = playerFeet.add(dir.getVector());
                             BlockPos frontHead = frontFeet.up();
 
-                            boolean feetSolid = !client.world.getBlockState(frontFeet).isAir() && !isDiamond(client.world, frontFeet);
-                            boolean headSolid = !client.world.getBlockState(frontHead).isAir() && !isDiamond(client.world, frontHead);
+                            boolean feetSolid = !isAirOrDiamondOrBedrock(client.world, frontFeet);
+                            boolean headSolid = !isAirOrDiamondOrBedrock(client.world, frontHead);
 
                             if (feetSolid && !headSolid) {
                                 // Прыгаем на одиночный блок
@@ -320,6 +328,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
+    private boolean isAirOrDiamondOrBedrock(World world, BlockPos pos) {
+        var state = world.getBlockState(pos);
+        return state.isAir() || isDiamond(world, pos) || state.isOf(Blocks.BEDROCK);
+    }
+
+    /**
+     * Возвращает ближайшее препятствие (включая боковые), которое мешает движению к цели.
+     * Игнорирует воздух, алмазы и бедрок.
+     */
     private BlockPos findBestObstacle(MinecraftClient client, Vec3d targetCenter) {
         Vec3d eyePos = client.player.getEyePos();
         Vec3d dir = targetCenter.subtract(eyePos).normalize();
@@ -330,18 +347,24 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
         for (double d = 0; d < maxDist; d += step) {
             currentPos = eyePos.add(dir.multiply(d));
+            // Центральные позиции
             BlockPos headPos = new BlockPos((int)Math.floor(currentPos.x), (int)Math.floor(currentPos.y), (int)Math.floor(currentPos.z));
             BlockPos feetPos = headPos.down();
 
-            if (!headPos.equals(lastBlock)) {
-                lastBlock = headPos;
-                if (!client.world.getBlockState(headPos).isAir() && !isDiamond(client.world, headPos)) {
-                    return headPos;
-                }
-                if (!client.world.getBlockState(feetPos).isAir() && !isDiamond(client.world, feetPos)) {
-                    return feetPos;
+            // Собираем все позиции для проверки: центральная и соседние по горизонтали (чтобы не застревать боками)
+            BlockPos[] positions = {
+                headPos, feetPos,
+                headPos.east(), headPos.west(), headPos.north(), headPos.south(),
+                feetPos.east(), feetPos.west(), feetPos.north(), feetPos.south()
+            };
+
+            for (BlockPos pos : positions) {
+                if (!pos.equals(lastBlock) && !isAirOrDiamondOrBedrock(client.world, pos)) {
+                    // Препятствие найдено, возвращаем его
+                    return pos;
                 }
             }
+            lastBlock = headPos; // отмечаем, что этот участок проверили
         }
         return null;
     }
@@ -356,4 +379,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-                }
+        }
