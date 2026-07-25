@@ -12,6 +12,8 @@ import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.*;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
@@ -32,6 +34,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private boolean active = false;
     private BlockPos target = null;
     private int pickupTicks = 0;
+
+    // Побег из бедроковой ловушки
+    private boolean escaping = false;
+    private int escapeTimer = 0;
+    private int escapeSlot = -1;
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
@@ -68,17 +75,31 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     sendMsg("Авто-шахтёр активирован", Formatting.GREEN);
                     target = null;
                     pickupTicks = 0;
+                    escaping = false;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
                     stopMovement(client);
                     target = null;
                     pickupTicks = 0;
+                    escaping = false;
                 }
             }
 
             if (!active) return;
 
             try {
+                // Побег из бедроковой ловушки имеет высший приоритет
+                if (escaping) {
+                    handleEscape(client);
+                    return;
+                }
+
+                // Проверка на ловушку каждые 2 секунды (40 тиков)
+                if (client.player.age % 40 == 0 && isTrapped(client)) {
+                    startEscape(client);
+                    return;
+                }
+
                 // Подбор предметов после добычи
                 if (pickupTicks > 0) {
                     pickupTicks--;
@@ -93,12 +114,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     client.options.attackKey.setPressed(false);
                     client.options.jumpKey.setPressed(false);
                     if (pickupTicks == 0) {
-                        target = null; // переходим к поиску следующего алмаза
+                        target = null;
                     }
                     return;
                 }
 
-                // Поиск ближайшего алмаза
+                // Поиск алмаза
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -112,13 +133,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Добыча алмаза, если рядом
+                // Добыча алмаза
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     if (isDiamond(client.world, target)) {
                         client.options.attackKey.setPressed(true);
                     } else {
-                        client.options.attackKey.setPressed(false); // алмаз исчез, не бьём
+                        client.options.attackKey.setPressed(false);
                     }
                     client.options.forwardKey.setPressed(false);
                     client.options.jumpKey.setPressed(false);
@@ -126,14 +147,14 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     if (!isDiamond(client.world, target)) {
                         client.options.attackKey.setPressed(false);
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
-                        pickupTicks = 20; // 1 секунда на подбор
+                        pickupTicks = 20;
                     }
                 } else {
-                    // Навигация к цели
+                    // Навигация
                     BlockPos playerFeet = client.player.getBlockPos();
                     int deltaY = target.getY() - playerFeet.getY();
 
-                    // Подъём: алмаз выше
+                    // Подъём
                     if (deltaY > 0) {
                         Direction dir = Direction.fromHorizontalDegrees((double) client.player.getYaw());
                         BlockPos frontFeet = playerFeet.add(dir.getVector());
@@ -149,13 +170,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         } else if (headSolid) {
                             safeMine(client, frontHead);
                         } else if (feetSolid) {
-                            // Можно запрыгнуть, если над прыжком 2 блока воздуха и блок не бедрок
                             if (isAir(client.world, frontFeet.up(2)) && canBreak(client.world, frontFeet)) {
                                 client.options.jumpKey.setPressed(true);
                                 client.options.forwardKey.setPressed(true);
                                 client.options.attackKey.setPressed(false);
                             } else {
-                                // Потолок или бедрок – ломаем блок на уровне ног (если можно)
                                 safeMine(client, frontFeet);
                             }
                         } else {
@@ -166,7 +185,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         return;
                     }
 
-                    // Спуск: алмаз ниже
+                    // Спуск
                     if (deltaY < 0) {
                         BlockPos below = playerFeet.down();
                         if (isSolid(client.world, below)) {
@@ -175,14 +194,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         }
                     }
 
-                    // Горизонтальное движение / небольшой перепад
+                    // Горизонтальное движение
                     BlockPos obstacle = findBestObstacle(client, targetCenter);
                     if (obstacle != null) {
                         Vec3d obstacleCenter = Vec3d.ofCenter(obstacle);
                         double distToObstacle = eyePos.distanceTo(obstacleCenter);
 
                         if (distToObstacle > REACH_DISTANCE) {
-                            // Идём к препятствию, чтобы потом его сломать
                             faceTarget(client, obstacleCenter);
                             client.options.forwardKey.setPressed(true);
                             client.options.attackKey.setPressed(false);
@@ -196,7 +214,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             boolean headSolid = isSolid(client.world, frontHead);
 
                             if (feetSolid && !headSolid) {
-                                // Одиночный блок – прыгаем или ломаем
                                 if (isAir(client.world, frontFeet.up(2)) && canBreak(client.world, frontFeet)) {
                                     client.options.jumpKey.setPressed(true);
                                     client.options.forwardKey.setPressed(true);
@@ -205,12 +222,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                                     safeMine(client, frontFeet);
                                 }
                             } else {
-                                // Ломаем препятствие (если можно)
                                 safeMine(client, obstacle);
                             }
                         }
                     } else {
-                        // Путь свободен – идём прямо к алмазу
                         faceTarget(client, targetCenter);
                         client.options.forwardKey.setPressed(true);
                         client.options.attackKey.setPressed(false);
@@ -225,7 +240,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Рендеринг трассера и обводки (без изменений)
+        // Рендеринг трассера и обводки
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -287,6 +302,80 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         });
     }
 
+    // ======================== ПОБЕГ ИЗ БЕДРОКОВОЙ ЛОВУШКИ ========================
+    private boolean isTrapped(MinecraftClient client) {
+        BlockPos head = client.player.getBlockPos().up(); // уровень головы
+        // Проверяем 4 горизонтальных соседа на уровне головы
+        return isBedrock(client.world, head.north()) &&
+               isBedrock(client.world, head.south()) &&
+               isBedrock(client.world, head.east()) &&
+               isBedrock(client.world, head.west());
+    }
+
+    private boolean isBedrock(World world, BlockPos pos) {
+        return world.getBlockState(pos).isOf(Blocks.BEDROCK);
+    }
+
+    private void startEscape(MinecraftClient client) {
+        PlayerInventory inv = client.player.getInventory();
+        escapeSlot = -1;
+        // Ищем любой блок, который можно поставить (не пусто, не инструмент/кирка)
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = inv.getStack(i);
+            if (!stack.isEmpty() && !isTool(stack)) {
+                escapeSlot = i;
+                break;
+            }
+        }
+        if (escapeSlot != -1) {
+            escaping = true;
+            escapeTimer = 0; // таймер управляет последовательностью
+            sendMsg("Обнаружена бедроковая ловушка! Пытаюсь выбраться...", Formatting.YELLOW);
+        } else {
+            sendMsg("Нет блоков для побега из ловушки!", Formatting.RED);
+        }
+    }
+
+    private void handleEscape(MinecraftClient client) {
+        if (escapeSlot == -1) {
+            escaping = false;
+            return;
+        }
+
+        client.player.getInventory().selectedSlot = escapeSlot;
+        // Направляем взгляд строго вниз
+        client.player.setPitch(90.0f);
+
+        escapeTimer++;
+
+        if (escapeTimer <= 10) {
+            // Держим ПКМ для установки блока под ноги
+            client.options.useKey.setPressed(true);
+            client.options.jumpKey.setPressed(false);
+            client.options.forwardKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+        } else if (escapeTimer <= 15) {
+            // Отпускаем ПКМ, нажимаем прыжок
+            client.options.useKey.setPressed(false);
+            client.options.jumpKey.setPressed(true);
+        } else {
+            // Выход из режима побега
+            client.options.jumpKey.setPressed(false);
+            client.options.useKey.setPressed(false);
+            escaping = false;
+            escapeTimer = 0;
+            sendMsg("Побег завершён.", Formatting.GREEN);
+        }
+    }
+
+    private boolean isTool(ItemStack stack) {
+        // Простейшая проверка: если предмет — кирка, лопата, топор, мотыга
+        String name = stack.getItem().toString().toLowerCase();
+        return name.contains("pickaxe") || name.contains("shovel") ||
+               name.contains("axe") || name.contains("hoe");
+    }
+
+    // ======================== ДВИЖЕНИЕ И ДОБЫЧА ========================
     private void stopMovement(MinecraftClient client) {
         client.options.forwardKey.setPressed(false);
         client.options.attackKey.setPressed(false);
@@ -302,9 +391,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.player.setPitch((float)pitch);
     }
 
-    /**
-     * Безопасная попытка добычи блока. Если блок нельзя сломать (бедрок, etc.), атака не включается.
-     */
     private void safeMine(MinecraftClient client, BlockPos targetBlock) {
         if (canBreak(client.world, targetBlock)) {
             faceTarget(client, Vec3d.ofCenter(targetBlock));
@@ -312,7 +398,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             client.options.forwardKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
         } else {
-            // Блок неломаемый — просто стоим, ждём смены обстановки
             client.options.attackKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
@@ -350,22 +435,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return world.getBlockState(pos).isAir();
     }
 
-    /** Блок твёрдый (не воздух, не алмаз, не бедрок) */
     private boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !isDiamond(world, pos) && !state.isOf(Blocks.BEDROCK);
     }
 
-    /** Можно ли сломать этот блок (не бедрок и не воздух) */
     private boolean canBreak(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !state.isOf(Blocks.BEDROCK);
     }
 
-    /**
-     * Возвращает ближайшее препятствие (центральный блок на пути), которое нужно сломать.
-     * Игнорирует воздух, алмазы и бедрок.
-     */
     private BlockPos findBestObstacle(MinecraftClient client, Vec3d targetCenter) {
         Vec3d eyePos = client.player.getEyePos();
         Vec3d dir = targetCenter.subtract(eyePos).normalize();
@@ -381,12 +460,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
             if (!headPos.equals(lastBlock)) {
                 lastBlock = headPos;
-                if (isSolid(client.world, headPos)) {
-                    return headPos;
-                }
-                if (isSolid(client.world, feetPos)) {
-                    return feetPos;
-                }
+                if (isSolid(client.world, headPos)) return headPos;
+                if (isSolid(client.world, feetPos)) return feetPos;
             }
         }
         return null;
