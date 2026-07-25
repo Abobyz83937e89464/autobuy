@@ -41,14 +41,20 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int escapeTimer = 0;
     private int escapeSlot = -1;
 
-    // Планирование пути
-    private Deque<BlockPos> path = new ArrayDeque<>();
+    private boolean avoidingBedrock = false;
+    private int avoidTicks = 0;
+    private Direction avoidDirection = null;
+    private BlockPos avoidOriginalTarget = null;
+
+    // Система следования по точкам маршрута
+    private List<BlockPos> plannedRoute = new ArrayList<>();
+    private int routeIndex = 0;
     private BlockPos currentMineTarget = null;
     private int mineStuckTicks = 0;
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
-    private static final int PATHFIND_RADIUS = 30;
+    private static final int PATHFIND_RADIUS = 40;
 
     @Override
     public void onInitialize() {
@@ -83,7 +89,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     target = null;
                     pickupTicks = 0;
                     escaping = false;
-                    path.clear();
+                    avoidingBedrock = false;
+                    plannedRoute.clear();
                     currentMineTarget = null;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
@@ -91,7 +98,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     target = null;
                     pickupTicks = 0;
                     escaping = false;
-                    path.clear();
+                    avoidingBedrock = false;
+                    plannedRoute.clear();
                     currentMineTarget = null;
                 }
             }
@@ -99,16 +107,19 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             if (!active) return;
 
             try {
+                // Побег из бедроковой ловушки
                 if (escaping) {
                     handleEscape(client);
                     return;
                 }
 
+                // Проверка на ловушку каждые 2 секунды
                 if (client.player.age % 40 == 0 && isTrapped(client)) {
                     startEscape(client);
                     return;
                 }
 
+                // Подбор предметов после добычи
                 if (pickupTicks > 0) {
                     pickupTicks--;
                     Vec3d targetCenter = Vec3d.ofCenter(target);
@@ -123,11 +134,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     client.options.jumpKey.setPressed(false);
                     if (pickupTicks == 0) {
                         target = null;
-                        path.clear();
+                        plannedRoute.clear();
                     }
                     return;
                 }
 
+                // Поиск алмаза
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -135,15 +147,16 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         return;
                     }
                     sendMsg("Найден алмаз: " + target.getX() + ", " + target.getY() + ", " + target.getZ(), Formatting.AQUA);
-                    path.clear();
+                    avoidingBedrock = false;
                     currentMineTarget = null;
-                    path = findPath(client, client.player.getBlockPos(), target);
+                    plannedRoute = planRoute(client, client.player.getBlockPos(), target);
                 }
 
                 Vec3d eyePos = client.player.getEyePos();
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
+                // Добыча алмаза, если он рядом
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(isDiamond(client.world, target));
@@ -157,38 +170,59 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
                         pickupTicks = 20;
                         currentMineTarget = null;
-                        path.clear();
+                        plannedRoute.clear();
                     }
                     return;
                 }
 
-                // Следование по пути
-                if (path.isEmpty()) {
-                    path = findPath(client, client.player.getBlockPos(), target);
-                    if (path.isEmpty()) {
+                // Если выполняется обход бедрока
+                if (avoidingBedrock) {
+                    handleBedrockAvoidance(client);
+                    return;
+                }
+
+                // Следование по запланированному маршруту
+                if (plannedRoute.isEmpty()) {
+                    plannedRoute = planRoute(client, client.player.getBlockPos(), target);
+                    if (plannedRoute.isEmpty()) {
                         sendMsg("Путь не найден, ищу другой алмаз.", Formatting.RED);
                         target = null;
                         return;
                     }
                 }
 
-                BlockPos nextStep = path.peekFirst();
-                if (nextStep == null || reached(client.player.getBlockPos(), nextStep)) {
-                    path.pollFirst();
-                    if (path.isEmpty()) {
+                // Убираем пройденные точки
+                while (routeIndex < plannedRoute.size() && reached(client.player.getBlockPos(), plannedRoute.get(routeIndex))) {
+                    routeIndex++;
+                }
+                if (routeIndex >= plannedRoute.size()) {
+                    // все точки пройдены, но мы не у цели — перестроим маршрут
+                    plannedRoute = planRoute(client, client.player.getBlockPos(), target);
+                    routeIndex = 0;
+                    if (plannedRoute.isEmpty()) {
+                        sendMsg("Путь потерян, ищу другой алмаз.", Formatting.RED);
+                        target = null;
                         return;
                     }
-                    nextStep = path.peekFirst();
                 }
 
-                // Если блок на пути непроходим – копаем
+                BlockPos nextStep = plannedRoute.get(routeIndex);
+
+                // Если блок на пути непроходим – копаем его
                 if (!isPassable(client.world, nextStep) || !isPassable(client.world, nextStep.up())) {
                     currentMineTarget = nextStep;
                     safeMine(client, currentMineTarget);
+                    mineStuckTicks++;
+                    if (mineStuckTicks > 60) { // больше 3 секунд – сброс
+                        plannedRoute.clear();
+                        mineStuckTicks = 0;
+                    }
                     return;
+                } else {
+                    mineStuckTicks = 0;
                 }
 
-                // Движение к следующему шагу
+                // Движение к следующей точке маршрута
                 faceTarget(client, Vec3d.ofCenter(nextStep));
                 client.options.forwardKey.setPressed(true);
                 client.options.jumpKey.setPressed(shouldJump(client, nextStep));
@@ -198,13 +232,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 sendMsg("Ошибка: " + e.getMessage(), Formatting.RED);
                 target = null;
                 pickupTicks = 0;
-                path.clear();
+                plannedRoute.clear();
                 currentMineTarget = null;
                 stopMovement(client);
             }
         });
 
-        // Полный рендеринг трассера и обводки
+        // Полный рендеринг трассера и обводки (без изменений)
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -320,52 +354,81 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ПЛАНИРОВАНИЕ ПУТИ (BFS) ========================
-    private Deque<BlockPos> findPath(MinecraftClient client, BlockPos start, BlockPos goal) {
+    // ======================== ПЛАНИРОВАНИЕ МАРШРУТА ========================
+    private List<BlockPos> planRoute(MinecraftClient client, BlockPos start, BlockPos goal) {
         World world = client.world;
-        if (world == null) return new ArrayDeque<>();
+        if (world == null) return new ArrayList<>();
 
+        // BFS для поиска кратчайшего пути
         Queue<BlockPos> queue = new LinkedList<>();
-        Map<BlockPos, BlockPos> parent = new HashMap<>();
+        Map<BlockPos, BlockPos> cameFrom = new HashMap<>();
         Set<BlockPos> visited = new HashSet<>();
 
         queue.add(start);
         visited.add(start);
-        parent.put(start, null);
+        cameFrom.put(start, null);
+
+        boolean found = false;
 
         while (!queue.isEmpty()) {
             BlockPos current = queue.poll();
-            if (current.equals(goal)) break;
 
+            if (current.equals(goal)) {
+                found = true;
+                break;
+            }
+
+            // Проверяем 6 направлений (все, включая вверх/вниз)
             for (Direction dir : Direction.values()) {
-                BlockPos next = current.offset(dir);
-                if (Math.abs(next.getX() - start.getX()) > PATHFIND_RADIUS ||
-                    Math.abs(next.getY() - start.getY()) > PATHFIND_RADIUS ||
-                    Math.abs(next.getZ() - start.getZ()) > PATHFIND_RADIUS) continue;
-                if (!visited.contains(next) && canTraverse(world, next)) {
-                    visited.add(next);
-                    parent.put(next, current);
-                    queue.add(next);
+                BlockPos neighbor = current.offset(dir);
+
+                // Ограничение дальности поиска
+                if (Math.abs(neighbor.getX() - start.getX()) > PATHFIND_RADIUS ||
+                    Math.abs(neighbor.getY() - start.getY()) > PATHFIND_RADIUS ||
+                    Math.abs(neighbor.getZ() - start.getZ()) > PATHFIND_RADIUS) {
+                    continue;
+                }
+
+                if (!visited.contains(neighbor) && canStandAt(world, neighbor)) {
+                    visited.add(neighbor);
+                    cameFrom.put(neighbor, current);
+                    queue.add(neighbor);
                 }
             }
         }
 
-        Deque<BlockPos> result = new ArrayDeque<>();
-        BlockPos node = goal;
-        while (node != null && !node.equals(start)) {
-            result.addFirst(node);
-            node = parent.get(node);
+        if (!found) {
+            // Если путь не найден, возвращаем пустой список – бот будет искать другой алмаз
+            return new ArrayList<>();
         }
-        return result;
+
+        // Восстановление маршрута от цели к старту
+        List<BlockPos> route = new ArrayList<>();
+        BlockPos current = goal;
+        while (current != null && !current.equals(start)) {
+            route.add(current);
+            current = cameFrom.get(current);
+        }
+        // Разворачиваем: от старта к цели
+        Collections.reverse(route);
+
+        return route;
     }
 
-    private boolean canTraverse(World world, BlockPos pos) {
+    /**
+     * Может ли игрок стоять в этой позиции (учитываем высоту 2 блока)?
+     * Блок считается проходимым, если это воздух или алмазная руда.
+     * Лава и бедрок НЕ проходимы.
+     */
+    private boolean canStandAt(World world, BlockPos pos) {
+        // Блок на уровне ног и блок над головой должны быть проходимы
         return isPassable(world, pos) && isPassable(world, pos.up());
     }
 
     private boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        return state.isAir() || isDiamond(world, pos) || state.isOf(Blocks.WATER);
+        // Проходим только через воздух или алмаз (чтобы бот шёл прямо к руде)
+        return state.isAir() || isDiamond(world, pos);
     }
 
     private boolean shouldJump(MinecraftClient client, BlockPos targetPos) {
@@ -374,7 +437,61 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private boolean reached(BlockPos playerFeet, BlockPos targetPos) {
-        return playerFeet.equals(targetPos);
+        // Считаем, что достигли, если находимся в том же блоке или очень близко
+        return playerFeet.getSquaredDistance(targetPos) < 1.5;
+    }
+
+    // ======================== ОБХОД БЕДРОКА (заглушка, не используется при планировании, но оставлен) ========================
+    private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir) {
+        Direction rightDir = blockedDir.rotateYClockwise();
+        Direction leftDir = blockedDir.rotateYCounterclockwise();
+        BlockPos playerFeet = client.player.getBlockPos();
+        if (isPassable(client.world, playerFeet.add(rightDir.getVector())) &&
+            isPassable(client.world, playerFeet.add(rightDir.getVector()).up())) {
+            avoidDirection = rightDir;
+        } else if (isPassable(client.world, playerFeet.add(leftDir.getVector())) &&
+                   isPassable(client.world, playerFeet.add(leftDir.getVector()).up())) {
+            avoidDirection = leftDir;
+        } else {
+            avoidingBedrock = false;
+            stopMovement(client);
+            target = null;
+            plannedRoute.clear();
+            sendMsg("Нет пути для обхода бедрока, ищу другой алмаз.", Formatting.RED);
+            return;
+        }
+
+        avoidingBedrock = true;
+        avoidTicks = 0;
+        avoidOriginalTarget = target;
+        sendMsg("Обхожу бедрок...", Formatting.YELLOW);
+    }
+
+    private void handleBedrockAvoidance(MinecraftClient client) {
+        avoidTicks++;
+        if (avoidTicks <= 3) {
+            faceDirection(client, avoidDirection);
+            client.options.leftKey.setPressed(false);
+            client.options.rightKey.setPressed(false);
+            if (avoidDirection == Direction.fromHorizontalDegrees(client.player.getYaw() + 90))
+                client.options.rightKey.setPressed(true);
+            else if (avoidDirection == Direction.fromHorizontalDegrees(client.player.getYaw() - 90))
+                client.options.leftKey.setPressed(true);
+            client.options.forwardKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+            client.options.jumpKey.setPressed(false);
+        } else if (avoidTicks <= 6) {
+            faceTarget(client, Vec3d.ofCenter(avoidOriginalTarget));
+            client.options.forwardKey.setPressed(true);
+            client.options.leftKey.setPressed(false);
+            client.options.rightKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+            client.options.jumpKey.setPressed(false);
+        } else {
+            avoidingBedrock = false;
+            avoidTicks = 0;
+            stopMovement(client);
+        }
     }
 
     // ======================== ДВИЖЕНИЕ И КОПАНИЕ ========================
@@ -392,7 +509,20 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private void faceBlock(MinecraftClient client, BlockPos pos) {
-        faceTarget(client, Vec3d.ofCenter(pos));
+        Vec3d center = Vec3d.ofCenter(pos);
+        faceTarget(client, center);
+    }
+
+    private void faceDirection(MinecraftClient client, Direction dir) {
+        float yaw = switch (dir) {
+            case NORTH -> 180;
+            case SOUTH -> 0;
+            case WEST -> 90;
+            case EAST -> -90;
+            default -> client.player.getYaw();
+        };
+        client.player.setYaw(yaw);
+        client.player.setPitch(0);
     }
 
     private void stopMovement(MinecraftClient client) {
@@ -435,7 +565,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
-    // Точечные фильтры: игнорирует алмазы, опасные или недоступные
+    // Все точечные фильтры
     private boolean isValidDiamondTarget(World world, BlockPos pos) {
         for (Direction direction : Direction.values()) {
             if (world.getBlockState(pos.offset(direction)).isOf(Blocks.LAVA)) return false;
@@ -455,4 +585,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                    }
+                             }
