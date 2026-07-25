@@ -48,7 +48,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
-    private static final int PATHFIND_RADIUS = 30; // радиус поиска пути
+    private static final int PATHFIND_RADIUS = 30;
 
     @Override
     public void onInitialize() {
@@ -137,7 +137,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     sendMsg("Найден алмаз: " + target.getX() + ", " + target.getY() + ", " + target.getZ(), Formatting.AQUA);
                     path.clear();
                     currentMineTarget = null;
-                    // Прокладываем путь к алмазу
                     path = findPath(client, client.player.getBlockPos(), target);
                 }
 
@@ -145,7 +144,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Добыча алмаза
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(isDiamond(client.world, target));
@@ -164,7 +162,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Перестроить путь, если он пуст или устарел
+                // Следование по пути
                 if (path.isEmpty()) {
                     path = findPath(client, client.player.getBlockPos(), target);
                     if (path.isEmpty()) {
@@ -174,26 +172,23 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     }
                 }
 
-                // Следующий узел пути
                 BlockPos nextStep = path.peekFirst();
                 if (nextStep == null || reached(client.player.getBlockPos(), nextStep)) {
-                    path.pollFirst(); // убираем пройденный узел
+                    path.pollFirst();
                     if (path.isEmpty()) {
-                        // обновим путь на следующем тике
                         return;
                     }
                     nextStep = path.peekFirst();
                 }
 
-                // Если нужно копать блок (nextStep не проходим)
-                if (!isPassable(client.world, nextStep) && !isPassable(client.world, nextStep.up())) {
+                // Если блок на пути непроходим – копаем
+                if (!isPassable(client.world, nextStep) || !isPassable(client.world, nextStep.up())) {
                     currentMineTarget = nextStep;
                     safeMine(client, currentMineTarget);
-                    // Не двигаемся, пока не сломаем
                     return;
                 }
 
-                // Движение к nextStep
+                // Движение к следующему шагу
                 faceTarget(client, Vec3d.ofCenter(nextStep));
                 client.options.forwardKey.setPressed(true);
                 client.options.jumpKey.setPressed(shouldJump(client, nextStep));
@@ -209,7 +204,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Рендеринг трассы и обводки
+        // Полный рендеринг трассера и обводки
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -228,9 +223,42 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex((float)(eyePos.x - camPos.x), (float)(eyePos.y - camPos.y), (float)(eyePos.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
             buffer.vertex((float)(targetCenter.x - camPos.x), (float)(targetCenter.y - camPos.y), (float)(targetCenter.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
 
-            // ... (обводка куба цели, как раньше, не сокращаю для краткости, но в реальном коде она полная)
-            // Здесь для экономии места опускаю повторяющийся код рендера, в реальном ответе он будет присутствовать.
-            // В финальном коде этот блок будет развёрнут полностью.
+            float minX = (float)(target.getX() - camPos.x);
+            float minY = (float)(target.getY() - camPos.y);
+            float minZ = (float)(target.getZ() - camPos.z);
+            float maxX = minX + 1.0f;
+            float maxY = minY + 1.0f;
+            float maxZ = minZ + 1.0f;
+
+            // Нижняя грань
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+
+            // Верхняя грань
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+
+            // Вертикали
+            buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(maxX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, minY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
+            buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
 
             BufferRenderer.drawWithGlobalProgram(buffer.end());
             matrices.pop();
@@ -246,6 +274,10 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     private boolean isBedrock(World world, BlockPos pos) {
         return world.getBlockState(pos).isOf(Blocks.BEDROCK);
+    }
+
+    private boolean isLava(World world, BlockPos pos) {
+        return world.getBlockState(pos).isOf(Blocks.LAVA);
     }
 
     private void startEscape(MinecraftClient client) {
@@ -288,17 +320,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ПЛАНИРОВАНИЕ ПУТИ ========================
-    /**
-     * Ищет путь от игрока к цели с помощью BFS с ограничением глубины.
-     * Возвращает очередь из BlockPos, которые нужно пройти (центры блоков).
-     * Если путь не найден, возвращает пустую очередь.
-     */
+    // ======================== ПЛАНИРОВАНИЕ ПУТИ (BFS) ========================
     private Deque<BlockPos> findPath(MinecraftClient client, BlockPos start, BlockPos goal) {
         World world = client.world;
         if (world == null) return new ArrayDeque<>();
 
-        // BFS
         Queue<BlockPos> queue = new LinkedList<>();
         Map<BlockPos, BlockPos> parent = new HashMap<>();
         Set<BlockPos> visited = new HashSet<>();
@@ -310,7 +336,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         while (!queue.isEmpty()) {
             BlockPos current = queue.poll();
             if (current.equals(goal)) break;
-            // Соседи: 4 горизонтальных + вверх/вниз (высота 2 блока)
+
             for (Direction dir : Direction.values()) {
                 BlockPos next = current.offset(dir);
                 if (Math.abs(next.getX() - start.getX()) > PATHFIND_RADIUS ||
@@ -324,7 +350,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         }
 
-        // Восстановление пути
         Deque<BlockPos> result = new ArrayDeque<>();
         BlockPos node = goal;
         while (node != null && !node.equals(start)) {
@@ -334,35 +359,20 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return result;
     }
 
-    /**
-     * Может ли игрок стоять в этой позиции (учитываем высоту 2 блока).
-     */
     private boolean canTraverse(World world, BlockPos pos) {
         return isPassable(world, pos) && isPassable(world, pos.up());
     }
 
-    /**
-     * Блок проходим (воздух, алмаз, жидкость, но не лава в данном случае — лаву мы исключаем из пути).
-     * Фактически isPassable ранее определён как воздух или алмаз. Расширим для жидкости,
-     * но лаву оставим непроходимой.
-     */
     private boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        return state.isAir() || isDiamond(world, pos) ||
-               state.isOf(Blocks.WATER); // можно и воду, если есть
+        return state.isAir() || isDiamond(world, pos) || state.isOf(Blocks.WATER);
     }
 
-    /**
-     * Проверяет, нужно ли прыгать, чтобы достичь целевого блока (если он выше).
-     */
     private boolean shouldJump(MinecraftClient client, BlockPos targetPos) {
         BlockPos playerFeet = client.player.getBlockPos();
         return targetPos.getY() > playerFeet.getY() && client.player.isOnGround();
     }
 
-    /**
-     * Достиг ли игрок указанного блока (с небольшой погрешностью).
-     */
     private boolean reached(BlockPos playerFeet, BlockPos targetPos) {
         return playerFeet.equals(targetPos);
     }
@@ -400,7 +410,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.player.setPitch((float) Math.toDegrees(-Math.asin(dir.y)));
     }
 
-    // ======================== ПОИСК АЛМАЗОВ ========================
+    // ======================== ПОИСК АЛМАЗОВ И ФИЛЬТРЫ ========================
     private BlockPos findNearestDiamond(MinecraftClient client) {
         World world = client.world;
         BlockPos playerPos = client.player.getBlockPos();
@@ -425,7 +435,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
-    // Все точечные фильтры на месте
+    // Точечные фильтры: игнорирует алмазы, опасные или недоступные
     private boolean isValidDiamondTarget(World world, BlockPos pos) {
         for (Direction direction : Direction.values()) {
             if (world.getBlockState(pos.offset(direction)).isOf(Blocks.LAVA)) return false;
@@ -436,6 +446,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         return true;
     }
 
+    // ======================== УТИЛИТЫ ========================
     private void sendMsg(String msg, Formatting color) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -444,4 +455,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-            }
+                    }
