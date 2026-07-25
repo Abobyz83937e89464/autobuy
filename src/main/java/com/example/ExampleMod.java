@@ -35,7 +35,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private BlockPos target = null;
     private int pickupTicks = 0;
 
-    // Побег из бедроковой ловушки
     private boolean escaping = false;
     private int escapeTimer = 0;
     private int escapeSlot = -1;
@@ -88,13 +87,13 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             if (!active) return;
 
             try {
-                // Побег из бедроковой ловушки имеет высший приоритет
+                // Побег из бедроковой ловушки
                 if (escaping) {
                     handleEscape(client);
                     return;
                 }
 
-                // Проверка на ловушку каждые 2 секунды (40 тиков)
+                // Проверка на ловушку
                 if (client.player.age % 40 == 0 && isTrapped(client)) {
                     startEscape(client);
                     return;
@@ -119,7 +118,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Поиск алмаза
+                // Поиск алмаза (с игнорированием опасных)
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -240,7 +239,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
-        // Рендеринг трассера и обводки
+        // Рендеринг
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -304,8 +303,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     // ======================== ПОБЕГ ИЗ БЕДРОКОВОЙ ЛОВУШКИ ========================
     private boolean isTrapped(MinecraftClient client) {
-        BlockPos head = client.player.getBlockPos().up(); // уровень головы
-        // Проверяем 4 горизонтальных соседа на уровне головы
+        BlockPos head = client.player.getBlockPos().up();
         return isBedrock(client.world, head.north()) &&
                isBedrock(client.world, head.south()) &&
                isBedrock(client.world, head.east()) &&
@@ -319,7 +317,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private void startEscape(MinecraftClient client) {
         PlayerInventory inv = client.player.getInventory();
         escapeSlot = -1;
-        // Ищем любой блок, который можно поставить (не пусто, не инструмент/кирка)
         for (int i = 0; i < 9; i++) {
             ItemStack stack = inv.getStack(i);
             if (!stack.isEmpty() && !isTool(stack)) {
@@ -329,7 +326,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
         if (escapeSlot != -1) {
             escaping = true;
-            escapeTimer = 0; // таймер управляет последовательностью
+            escapeTimer = 0;
             sendMsg("Обнаружена бедроковая ловушка! Пытаюсь выбраться...", Formatting.YELLOW);
         } else {
             sendMsg("Нет блоков для побега из ловушки!", Formatting.RED);
@@ -343,23 +340,19 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
 
         client.player.getInventory().selectedSlot = escapeSlot;
-        // Направляем взгляд строго вниз
         client.player.setPitch(90.0f);
 
         escapeTimer++;
 
         if (escapeTimer <= 10) {
-            // Держим ПКМ для установки блока под ноги
             client.options.useKey.setPressed(true);
             client.options.jumpKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
             client.options.attackKey.setPressed(false);
         } else if (escapeTimer <= 15) {
-            // Отпускаем ПКМ, нажимаем прыжок
             client.options.useKey.setPressed(false);
             client.options.jumpKey.setPressed(true);
         } else {
-            // Выход из режима побега
             client.options.jumpKey.setPressed(false);
             client.options.useKey.setPressed(false);
             escaping = false;
@@ -369,7 +362,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     }
 
     private boolean isTool(ItemStack stack) {
-        // Простейшая проверка: если предмет — кирка, лопата, топор, мотыга
         String name = stack.getItem().toString().toLowerCase();
         return name.contains("pickaxe") || name.contains("shovel") ||
                name.contains("axe") || name.contains("hoe");
@@ -413,7 +405,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             for (int y = -SCAN_RADIUS; y <= SCAN_RADIUS; y++) {
                 for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
                     BlockPos pos = playerPos.add(x, y, z);
-                    if (isDiamond(world, pos)) {
+                    if (isDiamond(world, pos) && isValidDiamondTarget(world, pos)) {
                         double dist = playerPos.getSquaredDistance(pos);
                         if (dist < nearestDist) {
                             nearestDist = dist;
@@ -431,15 +423,39 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
+    /**
+     * Точечные фильтры: игнорирует алмазы, которые невозможно/опасно добывать.
+     */
+    private boolean isValidDiamondTarget(World world, BlockPos pos) {
+        // Над лавой? (проверяем 3 блока вниз)
+        for (int dy = 1; dy <= 3; dy++) {
+            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) {
+                return false;
+            }
+        }
+        // Под бедроком?
+        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) {
+            return false;
+        }
+        // На уровне бедрока (соседи по горизонтали)?
+        if (isBedrock(world, pos.north()) || isBedrock(world, pos.south()) ||
+            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) {
+            return false;
+        }
+        return true;
+    }
+
     private boolean isAir(World world, BlockPos pos) {
         return world.getBlockState(pos).isAir();
     }
 
+    /** Блок твёрдый, но не бедрок и не алмаз */
     private boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !isDiamond(world, pos) && !state.isOf(Blocks.BEDROCK);
     }
 
+    /** Можно ли сломать блок (не воздух, не бедрок) */
     private boolean canBreak(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.isAir() && !state.isOf(Blocks.BEDROCK);
@@ -477,4 +493,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-}
+    }
