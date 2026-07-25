@@ -39,10 +39,9 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int escapeTimer = 0;
     private int escapeSlot = -1;
 
-    // Для обхода бедрока
     private boolean avoidingBedrock = false;
     private int avoidTicks = 0;
-    private Direction avoidDirection = null; // направление обхода
+    private Direction avoidDirection = null;
     private BlockPos avoidOriginalTarget = null;
 
     private static final double REACH_DISTANCE = 2.5;
@@ -81,25 +80,27 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     target = null;
                     pickupTicks = 0;
                     escaping = false;
+                    avoidingBedrock = false;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
                     stopMovement(client);
                     target = null;
                     pickupTicks = 0;
                     escaping = false;
+                    avoidingBedrock = false;
                 }
             }
 
             if (!active) return;
 
             try {
-                // Побег из бедроковой ловушки
+                // Побег из бедроковой ловушки имеет высший приоритет
                 if (escaping) {
                     handleEscape(client);
                     return;
                 }
 
-                // Проверка на ловушку
+                // Проверка на ловушку каждые 2 секунды
                 if (client.player.age % 40 == 0 && isTrapped(client)) {
                     startEscape(client);
                     return;
@@ -124,7 +125,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Поиск алмаза
+                // Поиск алмаза (с игнорированием опасных)
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -132,14 +133,14 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         return;
                     }
                     sendMsg("Найден алмаз: " + target.getX() + ", " + target.getY() + ", " + target.getZ(), Formatting.AQUA);
-                    avoidingBedrock = false; // сброс обхода при новой цели
+                    avoidingBedrock = false;
                 }
 
                 Vec3d eyePos = client.player.getEyePos();
                 Vec3d targetCenter = Vec3d.ofCenter(target);
                 double dist = eyePos.distanceTo(targetCenter);
 
-                // Добыча алмаза
+                // Добыча алмаза, если мы рядом
                 if (dist <= REACH_DISTANCE) {
                     faceTarget(client, targetCenter);
                     if (isDiamond(client.world, target)) {
@@ -364,7 +365,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             BlockPos below = playerFeet.down();
             if (isSolidOrBedrock(client.world, below)) {
                 if (isBedrock(client.world, below)) {
-                    // Бедрок под ногами — не можем спуститься, обходим?
                     startBedrockAvoidance(client, forward);
                     return;
                 }
@@ -417,7 +417,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     // ======================== ОБХОД БЕДРОКА ========================
     private void startBedrockAvoidance(MinecraftClient client, Direction blockedDir) {
-        // Проверяем право и лево от направления движения
         Direction rightDir = blockedDir.rotateYClockwise();
         Direction leftDir = blockedDir.rotateYCounterclockwise();
         BlockPos playerFeet = client.player.getBlockPos();
@@ -430,26 +429,22 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                    isPassable(client.world, playerFeet.add(leftDir.getVector()).up())) {
             avoidDirection = leftDir;
         } else {
-            // Не можем обойти, стоим
             stopMovement(client);
             return;
         }
 
         avoidingBedrock = true;
         avoidTicks = 0;
-        avoidOriginalTarget = target; // запоминаем цель
+        avoidOriginalTarget = target;
         sendMsg("Обхожу бедрок...", Formatting.YELLOW);
     }
 
     private void handleBedrockAvoidance(MinecraftClient client) {
         avoidTicks++;
-        // Двигаемся вбок 2 тика (примерно на 1 блок), потом вперёд 2 тика, потом возвращаемся к цели
         if (avoidTicks <= 3) {
-            // Смотрим в сторону обхода и идём туда
             faceDirection(client, avoidDirection);
             client.options.leftKey.setPressed(false);
             client.options.rightKey.setPressed(false);
-            // Двигаемся вбок: используем клавиши A/D
             if (avoidDirection == Direction.fromHorizontalDegrees(client.player.getYaw() + 90)) {
                 client.options.rightKey.setPressed(true);
             } else if (avoidDirection == Direction.fromHorizontalDegrees(client.player.getYaw() - 90)) {
@@ -459,7 +454,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             client.options.attackKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
         } else if (avoidTicks <= 6) {
-            // Проходим вперёд (в изначальном направлении к цели)
             faceTarget(client, Vec3d.ofCenter(avoidOriginalTarget));
             client.options.forwardKey.setPressed(true);
             client.options.leftKey.setPressed(false);
@@ -467,20 +461,17 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             client.options.attackKey.setPressed(false);
             client.options.jumpKey.setPressed(false);
         } else {
-            // Завершаем обход
             avoidingBedrock = false;
             avoidTicks = 0;
             stopMovement(client);
         }
     }
 
-    // Повернуться лицом к блоку
     private void faceBlock(MinecraftClient client, BlockPos pos) {
         Vec3d target = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
         faceTarget(client, target);
     }
 
-    // Повернуться в направлении
     private void faceDirection(MinecraftClient client, Direction dir) {
         float yaw = 0;
         switch (dir) {
@@ -493,7 +484,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         client.player.setPitch(0);
     }
 
-    // ======================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ========================
+    // ======================== ОСТАЛЬНЫЕ ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
     private void stopMovement(MinecraftClient client) {
         client.options.forwardKey.setPressed(false);
         client.options.attackKey.setPressed(false);
@@ -538,13 +529,23 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
+    /** Точечные фильтры: игнорирует алмазы, которые невозможно/опасно добывать. */
     private boolean isValidDiamondTarget(World world, BlockPos pos) {
+        // Над лавой? (проверяем 3 блока вниз)
         for (int dy = 1; dy <= 3; dy++) {
-            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) return false;
+            if (world.getBlockState(pos.down(dy)).isOf(Blocks.LAVA)) {
+                return false;
+            }
         }
-        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) return false;
+        // Под бедроком?
+        if (world.getBlockState(pos.up()).isOf(Blocks.BEDROCK)) {
+            return false;
+        }
+        // На уровне бедрока (соседи по горизонтали)?
         if (isBedrock(world, pos.north()) || isBedrock(world, pos.south()) ||
-            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) return false;
+            isBedrock(world, pos.east()) || isBedrock(world, pos.west())) {
+            return false;
+        }
         return true;
     }
 
@@ -574,4 +575,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             ));
         }
     }
-            }
+                                                     }
