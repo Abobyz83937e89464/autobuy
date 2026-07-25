@@ -153,7 +153,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                         client.options.attackKey.setPressed(false);
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
                         pickupTicks = 20; // ждём, чтобы подобрать дроп
-                        // цель остаётся, пока не закончится подбор
                     }
                     return;
                 }
@@ -287,7 +286,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                name.contains("axe") || name.contains("hoe");
     }
 
-    // ======================== ПРЯМОЛИНЕЙНОЕ ДВИЖЕНИЕ (ПРАВИЛЬНЫЕ СТУПЕНЬКИ) ========================
+    // ======================== ПРЯМОЛИНЕЙНОЕ ДВИЖЕНИЕ (ИСПРАВЛЕНО: копаем над головой) ========================
     private void navigateStraight(MinecraftClient client) {
         BlockPos playerFeet = client.player.getBlockPos();
         Vec3d targetCenter = Vec3d.ofCenter(target);
@@ -297,11 +296,23 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
         BlockPos frontFeet = playerFeet.add(forward.getVector());
         BlockPos frontHead = frontFeet.up();
-        BlockPos frontAbove = frontFeet.up(2);  // над головой
+        BlockPos frontAbove = frontFeet.up(2);  // над головой впереди
 
         // --- Подъём (цель выше) ---
         if (deltaY > 0) {
-            // Убираем препятствия над головой и перед головой, но НЕ трогаем блок перед ногами (это будущая ступенька)
+            // 1. Убираем блоки НАД ГОЛОВОЙ НА МЕСТЕ (чтобы было куда прыгнуть)
+            BlockPos aboveFeet = playerFeet.up();   // блок прямо над игроком
+            BlockPos aboveHead = playerFeet.up(2);  // выше
+            if (isSolidOrBedrock(client.world, aboveFeet)) {
+                safeMine(client, aboveFeet);
+                return;
+            }
+            if (isSolidOrBedrock(client.world, aboveHead)) {
+                safeMine(client, aboveHead);
+                return;
+            }
+
+            // 2. Убираем препятствия впереди: сначала верхний, потом средний, потом нижний
             if (isSolidOrBedrock(client.world, frontAbove)) {
                 if (isBedrock(client.world, frontAbove)) { startBedrockAvoidance(client, forward); return; }
                 faceBlock(client, frontAbove);
@@ -319,14 +330,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 return;
             }
 
-            // Если перед ногами есть твёрдый блок – используем его как ступеньку, прыгаем
+            // 3. Если перед ногами есть твёрдый блок – используем как ступеньку, прыгаем
             if (isSolidOrBedrock(client.world, frontFeet)) {
+                if (isBedrock(client.world, frontFeet)) { startBedrockAvoidance(client, forward); return; }
                 client.options.forwardKey.setPressed(true);
-                client.options.jumpKey.setPressed(client.player.isOnGround()); // прыгаем только стоя на земле
+                client.options.jumpKey.setPressed(client.player.isOnGround());
                 client.options.attackKey.setPressed(false);
                 return;
             } else {
-                // Нет ступеньки – просто идём вперёд (может, подойдём к стене)
+                // Нет ступеньки – просто идём вперёд
                 client.options.forwardKey.setPressed(true);
                 client.options.jumpKey.setPressed(false);
                 client.options.attackKey.setPressed(false);
@@ -527,4 +539,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                }
+                      }
