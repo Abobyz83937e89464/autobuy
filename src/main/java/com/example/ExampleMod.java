@@ -31,7 +31,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private boolean active = false;
     private BlockPos target = null;
     private int pickupTicks = 0;
-    private int mineTicks = 0;
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
@@ -68,31 +67,32 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     sendMsg("Авто-шахтёр активирован", Formatting.GREEN);
                     target = null;
                     pickupTicks = 0;
-                    mineTicks = 0;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
                     stopMovement(client);
                     target = null;
                     pickupTicks = 0;
-                    mineTicks = 0;
                 }
             }
 
             if (!active) return;
 
             try {
+                // Режим подбора после добычи алмаза
                 if (pickupTicks > 0) {
                     pickupTicks--;
+                    // Идём вперёд к центру бывшего алмаза
+                    faceTarget(client, Vec3d.ofCenter(target));
                     client.options.forwardKey.setPressed(true);
                     client.options.attackKey.setPressed(false);
                     client.options.jumpKey.setPressed(false);
-                    faceTarget(client, Vec3d.ofCenter(target));
                     if (pickupTicks == 0) {
-                        target = null;
+                        target = null; // поиск следующего алмаза
                     }
                     return;
                 }
 
+                // Поиск алмаза, если цель отсутствует
                 if (target == null) {
                     target = findNearestDiamond(client);
                     if (target == null) {
@@ -106,6 +106,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 double dist = client.player.getEyePos().distanceTo(targetCenter);
 
                 if (dist <= REACH_DISTANCE) {
+                    // Добываем алмаз
                     faceTarget(client, targetCenter);
                     client.options.attackKey.setPressed(true);
                     client.options.forwardKey.setPressed(false);
@@ -113,10 +114,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     if (!isDiamond(client.world, target)) {
                         client.options.attackKey.setPressed(false);
                         sendMsg("Алмаз добыт! Подбираю...", Formatting.GREEN);
-                        pickupTicks = 20;
+                        pickupTicks = 20; // 1 секунда на подбор
                     }
                 } else {
-                    navigateTo(client, targetCenter);
+                    // Прокладываем путь
+                    navigateTo(client, target);
                 }
             } catch (Exception e) {
                 sendMsg("Ошибка: " + e.getMessage(), Formatting.RED);
@@ -126,6 +128,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             }
         });
 
+        // Рендеринг трассера и обводки (без изменений)
         WorldRenderEvents.LAST.register(context -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || !active || target == null) return;
@@ -141,9 +144,11 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             Tessellator tessellator = Tessellator.getInstance();
             BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR);
 
+            // Линия от глаз к цели (жёлтая)
             buffer.vertex((float)(eyePos.x - camPos.x), (float)(eyePos.y - camPos.y), (float)(eyePos.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
             buffer.vertex((float)(targetCenter.x - camPos.x), (float)(targetCenter.y - camPos.y), (float)(targetCenter.z - camPos.z)).color(1.0f, 1.0f, 0.0f, 1.0f);
 
+            // Обводка куба цели (белая)
             float minX = (float)(target.getX() - camPos.x);
             float minY = (float)(target.getY() - camPos.y);
             float minZ = (float)(target.getZ() - camPos.z);
@@ -169,7 +174,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, maxZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
-            // Вертикали
+            // Вертикальные рёбра
             buffer.vertex(minX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(minX, maxY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
             buffer.vertex(maxX, minY, minZ).color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -227,38 +232,106 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                world.getBlockState(pos).isOf(Blocks.DEEPSLATE_DIAMOND_ORE);
     }
 
-    private void navigateTo(MinecraftClient client, Vec3d targetCenter) {
-        faceTarget(client, targetCenter);
+    /**
+     * Интеллектуальная навигация к алмазу с учётом разницы высот.
+     */
+    private void navigateTo(MinecraftClient client, BlockPos targetBlock) {
+        faceTarget(client, Vec3d.ofCenter(targetBlock));
         float yaw = client.player.getYaw();
-        // Исправление: используем fromHorizontalDegrees
         Direction dir = Direction.fromHorizontalDegrees((double) yaw);
-        BlockPos playerPos = client.player.getBlockPos();
-        BlockPos frontBase = playerPos.add(dir.getVector());
-        BlockPos frontFeet = frontBase;
-        BlockPos frontHead = frontFeet.up();
 
+        BlockPos playerFeet = client.player.getBlockPos(); // позиция ног
+        BlockPos frontFeet = playerFeet.add(dir.getVector()); // прямо впереди на уровне пола
+        BlockPos frontHead = frontFeet.up(); // блок на уровне головы
+        BlockPos frontAbove = frontFeet.up(2); // блок над головой
+
+        // Разница по высоте между алмазом и игроком
+        int deltaY = targetBlock.getY() - playerFeet.getY();
+
+        // Проверяем, является ли блок твёрдым (не воздух, не алмаз)
         boolean feetSolid = !client.world.getBlockState(frontFeet).isAir() && !isDiamond(client.world, frontFeet);
         boolean headSolid = !client.world.getBlockState(frontHead).isAir() && !isDiamond(client.world, frontHead);
+        boolean aboveSolid = !client.world.getBlockState(frontAbove).isAir() && !isDiamond(client.world, frontAbove);
 
-        if (feetSolid && headSolid) {
-            faceTarget(client, Vec3d.ofCenter(frontFeet));
-            client.options.attackKey.setPressed(true);
-            client.options.forwardKey.setPressed(false);
-            client.options.jumpKey.setPressed(false);
-        } else if (feetSolid && !headSolid) {
+        // Если цель выше – приоритет копать вверх
+        if (deltaY > 1) {
+            // Сначала ломаем блок над головой, если есть
+            if (aboveSolid) {
+                faceTarget(client, Vec3d.ofCenter(frontAbove));
+                client.options.attackKey.setPressed(true);
+                client.options.forwardKey.setPressed(false);
+                client.options.jumpKey.setPressed(false);
+                return;
+            }
+            // Затем ломаем блок на уровне головы
+            if (headSolid) {
+                faceTarget(client, Vec3d.ofCenter(frontHead));
+                client.options.attackKey.setPressed(true);
+                client.options.forwardKey.setPressed(false);
+                client.options.jumpKey.setPressed(false);
+                return;
+            }
+            // Если оба свободны, идём вперёд (персонаж будет подниматься за счёт механики ступенек, если пол выше)
             client.options.attackKey.setPressed(false);
             client.options.forwardKey.setPressed(true);
-            client.options.jumpKey.setPressed(true);
-        } else if (!feetSolid && headSolid) {
-            faceTarget(client, Vec3d.ofCenter(frontHead));
-            client.options.attackKey.setPressed(true);
-            client.options.forwardKey.setPressed(false);
-            client.options.jumpKey.setPressed(false);
-        } else {
-            client.options.attackKey.setPressed(false);
-            client.options.forwardKey.setPressed(true);
-            client.options.jumpKey.setPressed(false);
+            client.options.jumpKey.setPressed(feetSolid && !headSolid); // прыгаем, если есть препятствие под ногами и нет над головой
+            return;
         }
+
+        // Если цель ниже – приоритет копать вниз
+        if (deltaY < 0) {
+            // Проверяем блок прямо перед ногами на уровне пола
+            if (feetSolid) {
+                faceTarget(client, Vec3d.ofCenter(frontFeet));
+                client.options.attackKey.setPressed(true);
+                client.options.forwardKey.setPressed(false);
+                client.options.jumpKey.setPressed(false);
+                return;
+            }
+            // Если впереди свободно, идём вперёд
+            client.options.attackKey.setPressed(false);
+            client.options.forwardKey.setPressed(true);
+            client.options.jumpKey.setPressed(false);
+            return;
+        }
+
+        // Цель примерно на той же высоте или на 1 блок выше (нужен прыжок)
+        if (deltaY == 1) {
+            // Если есть блок на уровне головы – убираем его, потом прыгнем
+            if (headSolid) {
+                faceTarget(client, Vec3d.ofCenter(frontHead));
+                client.options.attackKey.setPressed(true);
+                client.options.forwardKey.setPressed(false);
+                client.options.jumpKey.setPressed(false);
+                return;
+            }
+            // Если блок под ногами и нет над головой – прыгаем
+            if (feetSolid && !headSolid) {
+                client.options.attackKey.setPressed(false);
+                client.options.forwardKey.setPressed(true);
+                client.options.jumpKey.setPressed(true);
+                return;
+            }
+            // Иначе просто идём
+            client.options.attackKey.setPressed(false);
+            client.options.forwardKey.setPressed(true);
+            client.options.jumpKey.setPressed(false);
+            return;
+        }
+
+        // deltaY == 0 – обычное движение вперёд, убирая препятствия
+        if (headSolid || feetSolid) {
+            // Ломаем верхний блок, если есть, чтобы пройти
+            faceTarget(client, Vec3d.ofCenter(headSolid ? frontHead : frontFeet));
+            client.options.attackKey.setPressed(true);
+            client.options.forwardKey.setPressed(false);
+            client.options.jumpKey.setPressed(false);
+            return;
+        }
+        // Свободный путь – идём
+        client.options.attackKey.setPressed(false);
+        client.options.forwardKey.setPressed(true);
+        client.options.jumpKey.setPressed(false);
     }
 
     private void sendMsg(String msg, Formatting color) {
