@@ -13,6 +13,7 @@ import net.minecraft.client.render.*;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -54,11 +55,27 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int lastProgressTick = 0;
     private BlockPos lastFeetPos = null;
 
+    // Автоочистка инвентаря
+    private int lastCleanupAge = 0;
+    private boolean cleaningMode = false;
+    private int cleaningTick = 0;
+    private static final int CLEANUP_INTERVAL = 1200; // 60 секунд (20 тиков/сек * 60)
+
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
     private static final int PATHFIND_RADIUS = 30;
 
     private int rescanCooldown = 0;
+
+    // Список предметов, которые считаются мусором и будут выбрасываться
+    private static final Set<Item> JUNK_ITEMS = new HashSet<>(Arrays.asList(
+        Blocks.STONE.asItem(),
+        Blocks.COBBLESTONE.asItem(),
+        Blocks.IRON_ORE.asItem(),
+        Blocks.REDSTONE_ORE.asItem(),
+        Blocks.COAL_ORE.asItem(),
+        Blocks.LAPIS_ORE.asItem()
+    ));
 
     @Override
     public void onInitialize() {
@@ -97,6 +114,8 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     plannedRoute.clear();
                     currentMineTarget = null;
                     rescanCooldown = 0;
+                    cleaningMode = false;
+                    lastCleanupAge = client.player.age;
                 } else {
                     sendMsg("Авто-шахтёр деактивирован", Formatting.RED);
                     stopMovement(client);
@@ -107,12 +126,25 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     plannedRoute.clear();
                     currentMineTarget = null;
                     rescanCooldown = 0;
+                    cleaningMode = false;
                 }
             }
 
             if (!active) return;
 
             try {
+                // Проверка необходимости очистки инвентаря
+                if (!cleaningMode && !escaping && pickupTicks <= 0 &&
+                    client.player.age - lastCleanupAge >= CLEANUP_INTERVAL) {
+                    startCleanup(client);
+                    return;
+                }
+
+                if (cleaningMode) {
+                    doCleanup(client);
+                    return;
+                }
+
                 if (escaping) {
                     handleEscape(client);
                     return;
@@ -190,7 +222,6 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                     return;
                 }
 
-                // Если маршрут пуст или движение застопорилось, используем прямое движение
                 if (plannedRoute.isEmpty() || 
                     (client.player.age - lastProgressTick > 60 && 
                      client.player.getBlockPos().equals(lastFeetPos))) {
@@ -211,6 +242,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                 plannedRoute.clear();
                 currentMineTarget = null;
                 rescanCooldown = 0;
+                cleaningMode = false;
                 stopMovement(client);
             }
         });
@@ -274,6 +306,44 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
             BufferRenderer.drawWithGlobalProgram(buffer.end());
             matrices.pop();
         });
+    }
+
+    // ======================== АВТООЧИСТКА ИНВЕНТАРЯ ========================
+    private void startCleanup(MinecraftClient client) {
+        cleaningMode = true;
+        cleaningTick = 0;
+        stopMovement(client);
+        // Разворачиваемся назад
+        client.player.setYaw(client.player.getYaw() + 180);
+        client.player.setPitch(30); // небольшой наклон вниз, чтобы предметы падали сзади
+        sendMsg("Очищаю инвентарь...", Formatting.GRAY);
+    }
+
+    private void doCleanup(MinecraftClient client) {
+        PlayerInventory inv = client.player.getInventory();
+
+        // Проходим по всем слотам (0–35), по одному слоту за тик
+        if (cleaningTick < 36) {
+            int slot = cleaningTick;
+            inv.selectedSlot = slot;
+            ItemStack stack = inv.getStack(slot);
+            if (!stack.isEmpty() && JUNK_ITEMS.contains(stack.getItem())) {
+                client.options.dropKey.setPressed(true); // нажимаем Q
+            } else {
+                client.options.dropKey.setPressed(false);
+            }
+            cleaningTick++;
+        } else {
+            // Завершаем очистку
+            client.options.dropKey.setPressed(false);
+            cleaningMode = false;
+            lastCleanupAge = client.player.age; // обновляем таймер
+            // Возвращаемся к цели, если она есть
+            if (target != null) {
+                faceTarget(client, Vec3d.ofCenter(target));
+            }
+            sendMsg("Инвентарь очищен.", Formatting.GREEN);
+        }
     }
 
     // ======================== ПОБЕГ ИЗ БЕДРОКОВОЙ ЛОВУШКИ ========================
@@ -719,4 +789,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                                  }
+                                        }
