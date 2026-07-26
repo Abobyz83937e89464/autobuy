@@ -59,7 +59,15 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
     private int lastCleanupAge = 0;
     private boolean cleaningMode = false;
     private int cleaningTick = 0;
-    private static final int CLEANUP_INTERVAL = 1200; // 60 секунд (20 тиков/сек * 60)
+    private CleanupStep cleaningStep = CleanupStep.OPEN_INVENTORY;
+    private static final int CLEANUP_INTERVAL = 1200; // 60 секунд
+
+    private enum CleanupStep {
+        OPEN_INVENTORY,
+        DROP_ITEMS,
+        CLOSE_INVENTORY,
+        CHECK_PICKAXE
+    }
 
     private static final double REACH_DISTANCE = 2.5;
     private static final int SCAN_RADIUS = 50;
@@ -67,7 +75,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
     private int rescanCooldown = 0;
 
-    // Список предметов, которые считаются мусором и будут выбрасываться
+    // Список предметов для выбрасывания
     private static final Set<Item> JUNK_ITEMS = new HashSet<>(Arrays.asList(
         Blocks.STONE.asItem(),
         Blocks.COBBLESTONE.asItem(),
@@ -308,41 +316,86 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         });
     }
 
-    // ======================== АВТООЧИСТКА ИНВЕНТАРЯ ========================
+    // ======================== АВТООЧИСТКА ИНВЕНТАРЯ (ПОЛНОСТЬЮ ИСПРАВЛЕНА) ========================
     private void startCleanup(MinecraftClient client) {
         cleaningMode = true;
+        cleaningStep = CleanupStep.OPEN_INVENTORY;
         cleaningTick = 0;
         stopMovement(client);
-        // Разворачиваемся назад
-        client.player.setYaw(client.player.getYaw() + 180);
-        client.player.setPitch(30); // небольшой наклон вниз, чтобы предметы падали сзади
         sendMsg("Очищаю инвентарь...", Formatting.GRAY);
     }
 
     private void doCleanup(MinecraftClient client) {
-        PlayerInventory inv = client.player.getInventory();
+        switch (cleaningStep) {
+            case OPEN_INVENTORY:
+                // Нажимаем E, ждём 5 тиков для открытия GUI
+                if (cleaningTick == 0) {
+                    client.options.inventoryKey.setPressed(true);
+                }
+                cleaningTick++;
+                if (cleaningTick >= 5) {
+                    client.options.inventoryKey.setPressed(false);
+                    cleaningStep = CleanupStep.DROP_ITEMS;
+                    cleaningTick = 0;
+                }
+                break;
 
-        // Проходим по всем слотам (0–35), по одному слоту за тик
-        if (cleaningTick < 36) {
-            int slot = cleaningTick;
-            inv.selectedSlot = slot;
-            ItemStack stack = inv.getStack(slot);
-            if (!stack.isEmpty() && JUNK_ITEMS.contains(stack.getItem())) {
-                client.options.dropKey.setPressed(true); // нажимаем Q
-            } else {
-                client.options.dropKey.setPressed(false);
-            }
-            cleaningTick++;
-        } else {
-            // Завершаем очистку
-            client.options.dropKey.setPressed(false);
-            cleaningMode = false;
-            lastCleanupAge = client.player.age; // обновляем таймер
-            // Возвращаемся к цели, если она есть
-            if (target != null) {
-                faceTarget(client, Vec3d.ofCenter(target));
-            }
-            sendMsg("Инвентарь очищен.", Formatting.GREEN);
+            case DROP_ITEMS:
+                // По одному слоту за тик (0–35)
+                if (cleaningTick < 36) {
+                    int slot = cleaningTick;
+                    PlayerInventory inv = client.player.getInventory();
+                    ItemStack stack = inv.getStack(slot);
+                    if (!stack.isEmpty() && JUNK_ITEMS.contains(stack.getItem())) {
+                        // Перемещаем курсор на слот и нажимаем Q
+                        inv.selectedSlot = slot;
+                        client.options.dropKey.setPressed(true);
+                    } else {
+                        client.options.dropKey.setPressed(false);
+                    }
+                    cleaningTick++;
+                } else {
+                    client.options.dropKey.setPressed(false);
+                    cleaningStep = CleanupStep.CLOSE_INVENTORY;
+                    cleaningTick = 0;
+                }
+                break;
+
+            case CLOSE_INVENTORY:
+                // Закрываем инвентарь
+                if (cleaningTick == 0) {
+                    client.options.inventoryKey.setPressed(true);
+                }
+                cleaningTick++;
+                if (cleaningTick >= 5) {
+                    client.options.inventoryKey.setPressed(false);
+                    cleaningStep = CleanupStep.CHECK_PICKAXE;
+                    cleaningTick = 0;
+                }
+                break;
+
+            case CHECK_PICKAXE:
+                // Убеждаемся, что в руке кирка
+                PlayerInventory inv = client.player.getInventory();
+                ItemStack mainHand = inv.getMainHandStack();
+                if (mainHand.isEmpty() || !isTool(mainHand)) {
+                    // Ищем кирку в хотбаре
+                    for (int i = 0; i < 9; i++) {
+                        ItemStack stack = inv.getStack(i);
+                        if (!stack.isEmpty() && isTool(stack)) {
+                            inv.selectedSlot = i;
+                            break;
+                        }
+                    }
+                }
+                cleaningMode = false;
+                lastCleanupAge = client.player.age;
+                sendMsg("Инвентарь очищен.", Formatting.GREEN);
+                // Возвращаемся к цели, если она есть
+                if (target != null) {
+                    faceTarget(client, Vec3d.ofCenter(target));
+                }
+                break;
         }
     }
 
@@ -789,4 +842,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                                        }
+                }
