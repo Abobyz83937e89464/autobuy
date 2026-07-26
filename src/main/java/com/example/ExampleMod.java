@@ -454,15 +454,24 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         BlockPos frontHead = frontFeet.up();
         BlockPos frontAbove = frontFeet.up(2);
 
+        // Сброс текущей цели копания, если она стала ступенькой
+        if (currentMineTarget != null && deltaY > 0 &&
+            currentMineTarget.equals(frontFeet) && isPassable(client.world, frontHead)) {
+            currentMineTarget = null;
+            mineStuckTicks = 0;
+        }
+
         if (deltaY > 0) {
             // 1. Сначала обеспечиваем высоту 2 блока над головой на месте
             BlockPos aboveFeet = playerFeet.up();   // на уровне головы
             BlockPos aboveHead = playerFeet.up(2);  // над головой
             if (isSolidOrLavaOrBedrock(client.world, aboveFeet) && canBreak(client.world, aboveFeet)) {
+                currentMineTarget = aboveFeet;
                 safeMine(client, aboveFeet);
                 return;
             }
             if (isSolidOrLavaOrBedrock(client.world, aboveHead) && canBreak(client.world, aboveHead)) {
+                currentMineTarget = aboveHead;
                 safeMine(client, aboveHead);
                 return;
             }
@@ -475,10 +484,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
             // 2. Убираем препятствия впереди (ступеньки): сначала верхний блок, потом средний, потом нижний
             if (isSolidOrLavaOrBedrock(client.world, frontAbove) && canBreak(client.world, frontAbove)) {
+                currentMineTarget = frontAbove;
                 safeMine(client, frontAbove);
                 return;
             }
             if (isSolidOrLavaOrBedrock(client.world, frontHead) && canBreak(client.world, frontHead)) {
+                currentMineTarget = frontHead;
                 safeMine(client, frontHead);
                 return;
             }
@@ -492,6 +503,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
 
             // 3. Если перед ногами есть твёрдый блок – используем как ступеньку, прыгаем
             if (isSolidOrLavaOrBedrock(client.world, frontFeet)) {
+                currentMineTarget = null;   // <-- ВАЖНО: не копаем ступеньку
                 client.options.forwardKey.setPressed(true);
                 client.options.jumpKey.setPressed(client.player.isOnGround());
                 client.options.attackKey.setPressed(false);
@@ -509,6 +521,7 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         if (deltaY < 0) {
             BlockPos below = playerFeet.down();
             if (isSolidOrLavaOrBedrock(client.world, below) && canBreak(client.world, below)) {
+                currentMineTarget = below;
                 safeMine(client, below);
                 return;
             }
@@ -533,10 +546,12 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
         }
 
         if (feetBlocked) {
+            currentMineTarget = frontFeet;
             safeMine(client, frontFeet);
             return;
         }
         if (headBlocked) {
+            currentMineTarget = frontHead;
             safeMine(client, frontHead);
             return;
         }
@@ -704,4 +719,4 @@ public class ExampleMod implements ModInitializer, ClientModInitializer {
                             .append(Text.literal(msg).formatted(color)), false));
         }
     }
-                }
+                                  }
